@@ -12,7 +12,7 @@ import logging
 import psutil
 import traceback
 from io import StringIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from collections import defaultdict
 from functools import wraps
 from typing import Dict, Any, Optional, List, Tuple
@@ -736,6 +736,33 @@ async def reset_daily_data_if_needed(chat_id: int, uid: int):
             await db.update_user_last_updated(chat_id, uid, datetime.now().date())
         except Exception as init_error:
             logger.error(f"❌ 用户初始化也失败: {init_error}")
+
+
+async def get_current_period_date(chat_id: int) -> date:
+    """根据管理员设置的重置时间计算当前周期日期"""
+    now = get_beijing_time()
+
+    # 获取群组重置时间设置
+    group_data = await db.get_group_cached(chat_id)
+    reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+    reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+    # 计算当前重置周期开始时间
+    reset_time_today = now.replace(
+        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+    )
+
+    if now < reset_time_today:
+        # 当前时间还没到今天的重置点 → 当前周期是昨天
+        current_period_date = (reset_time_today - timedelta(days=1)).date()
+    else:
+        # 已经过了今天的重置点 → 当前周期是今天
+        current_period_date = reset_time_today.date()
+
+    logger.debug(
+        f"🕒 周期日期计算: 群组{chat_id}, 重置时间{reset_hour:02d}:{reset_minute:02d}, 当前周期: {current_period_date}"
+    )
+    return current_period_date
 
 
 async def check_activity_limit(chat_id: int, uid: int, act: str):
@@ -2500,13 +2527,9 @@ async def cmd_export(message: types.Message):
     chat_id = message.chat.id
     await message.answer("⏳ 正在导出数据，请稍候...")
     try:
-        await export_and_push_csv(chat_id)
-        await message.answer(
-            "✅ 数据已导出并推送到绑定的群组或频道！",
-            reply_markup=await get_main_keyboard(
-                chat_id=message.chat.id, show_admin=True
-            ),
-        )
+        current_period_date = await get_current_period_date(chat_id)
+        await export_and_push_csv(chat_id, target_date=current_period_date)
+        await message.answer(f"✅ 数据已导出并推送！(统计周期: {current_period_date})")
     except Exception as e:
         await message.answer(f"❌ 导出失败：{e}")
 
@@ -3424,8 +3447,9 @@ async def handle_export_data_button(message: types.Message):
     chat_id = message.chat.id
     await message.answer("⏳ 正在导出数据，请稍候.")
     try:
-        await export_and_push_csv(chat_id)
-        await message.answer("✅ 数据已导出并推送到绑定的群组或频道！")
+        current_period_date = await get_current_period_date(chat_id)
+        await export_and_push_csv(chat_id, target_date=current_period_date)
+        await message.answer(f"✅ 数据已导出并推送！(统计周期: {current_period_date})")
     except Exception as e:
         await message.answer(f"❌ 导出失败：{e}")
 
@@ -3476,19 +3500,26 @@ async def handle_other_text_messages(message: types.Message):
 
 # ==================== 用户功能优化 ====================
 async def show_history(message: types.Message):
-    """显示用户历史记录 - 优化版本"""
+    """显示用户历史记录 - 使用管理员重置时间"""
     chat_id = message.chat.id
     uid = message.from_user.id
+
+    # 获取当前周期日期
+    current_period_date = await get_current_period_date(chat_id)
 
     async with OptimizedUserContext(chat_id, uid) as user:
         first_line = (
             f"👤 用户：{MessageFormatter.format_user_link(uid, user['nickname'])}"
         )
-        text = f"{first_line}\n📊 今日记录：\n\n"
+        text = f"{first_line}\n📊 今日记录 (统计周期: {current_period_date})：\n\n"
 
         has_records = False
         activity_limits = await db.get_activity_limits_cached()
-        user_activities = await db.get_user_all_activities(chat_id, uid)
+
+        # 🎯 使用当前周期日期查询活动数据
+        user_activities = await db.get_user_all_activities(
+            chat_id, uid, current_period_date
+        )
 
         for act in activity_limits.keys():
             activity_info = user_activities.get(act, {})
@@ -3501,8 +3532,11 @@ async def show_history(message: types.Message):
                 text += f"• <code>{act}</code>：<code>{time_str}</code>，次数：<code>{count}</code>/<code>{max_times}</code> {status}\n"
                 has_records = True
 
-        total_time_all = user.get("total_accumulated_time", 0)
-        total_count_all = user.get("total_activity_count", 0)
+        # 🎯 从user_activities计算总体统计，而不是从users表
+        total_time_all = sum(act["time"] for act in user_activities.values())
+        total_count_all = sum(act["count"] for act in user_activities.values())
+
+        # 超时和罚款仍然从users表读取（这些数据不受日期影响）
         total_fine = user.get("total_fines", 0)
         overtime_count = user.get("overtime_count", 0)
         total_overtime = user.get("total_overtime_time", 0)
@@ -3529,11 +3563,13 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（修复版）——直接从 user_activities 聚合当天数据，避免依赖 last_updated"""
+    """显示排行榜 - 使用管理员重置时间"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    # 确保群组初始化（如果你 init_group 有副作用）
+    # 获取当前周期日期
+    current_period_date = await get_current_period_date(chat_id)
+
     await db.init_group(chat_id)
 
     # 读取活动列表（带缓存）
@@ -3548,11 +3584,9 @@ async def show_rank(message: types.Message):
         return
 
     # 准备文本头
-    rank_text = "🏆 今日活动排行榜\n\n"
-    today = datetime.now().date()
+    rank_text = f"🏆 今日活动排行榜 (统计周期: {current_period_date})\n\n"
 
-    # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
-    top_n = 3
+    # 使用当前周期日期查询
     async with db.pool.acquire() as conn:
         any_result = False
         for act in activity_limits.keys():
@@ -3570,12 +3604,11 @@ async def show_rank(message: types.Message):
                 """,
                 chat_id,
                 act,
-                today,
-                top_n,
+                current_period_date,  # 🎯 使用管理员时间
+                3,  # top_n
             )
 
             if not rows:
-                # 跳过没有数据的活动（也可以显示“暂无记录”）
                 continue
 
             any_result = True
@@ -3584,23 +3617,13 @@ async def show_rank(message: types.Message):
                 user_id = row["user_id"]
                 name = row["nickname"] or str(user_id)
                 time_sec = row["total_time"] or 0
-                # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
-                # 这里尽量使用项目里已有的工具：
-                try:
-                    time_str = MessageFormatter.format_time(int(time_sec))
-                except Exception:
-                    # 兜底格式化为秒->时分秒
-                    time_str = (
-                        db.format_seconds_to_hms(int(time_sec))
-                        if hasattr(db, "format_seconds_to_hms")
-                        else f"{int(time_sec)}s"
-                    )
+                time_str = MessageFormatter.format_time(int(time_sec))
 
                 rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - <code>{time_str}</code>\n"
             rank_text += "\n"
 
     if not any_result:
-        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
+        rank_text = f"🏆 今日活动排行榜 (统计周期: {current_period_date})\n\n暂时没有任何活动记录，大家快去打卡吧！"
 
     await message.answer(
         rank_text,
@@ -3951,6 +3974,9 @@ async def export_and_push_csv(
 
     has_data = False
 
+    if target_date is None:
+        target_date = await get_current_period_date(chat_id)
+
     # 关键：把 target_date 传给 db.get_group_statistics
     group_stats = await db.get_group_statistics(chat_id, target_date)
 
@@ -4260,12 +4286,15 @@ async def auto_daily_export_task():
                 if now_minutes == target_time:
                     logger.info(f"📤 到达重置前导出时间，导出群组 {chat_id} 数据中...")
 
-                    file_name = (
-                        f"group_{chat_id}_pre_reset_{now.strftime('%Y%m%d')}.csv"
-                    )
+                    current_period_date = await get_current_period_date(chat_id)
+
+                    file_name = f"group_{chat_id}_pre_reset_{current_period_date.strftime('%Y%m%d')}.csv"
                     await asyncio.wait_for(
                         export_and_push_csv(
-                            chat_id, to_admin_if_no_group=True, file_name=file_name
+                            chat_id,
+                            to_admin_if_no_group=True,
+                            file_name=file_name,
+                            target_date=current_period_date,
                         ),
                         timeout=30,
                     )
@@ -4353,21 +4382,30 @@ async def delayed_export(chat_id: int, delay_minutes: int = 30):
         await asyncio.sleep(delay_minutes * 60)
 
         # 🆕 关键修复：明确获取昨天的日期
-        yesterday_dt = get_beijing_time() - timedelta(days=1)
-        yesterday_date = yesterday_dt.date()
+        now = get_beijing_time()
+        group_data = await db.get_group_cached(chat_id)
+        reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        reset_time = now.replace(
+            hour=reset_hour, minute=reset_minute, second=0
+        ) - timedelta(minutes=delay_minutes)
+        target_period_date = reset_time.date()
 
         # 生成文件名（用昨日日期）
-        file_name = f"group_{chat_id}_statistics_{yesterday_dt.strftime('%Y%m%d')}.csv"
+        file_name = (
+            f"group_{chat_id}_statistics_{target_period_date.strftime('%Y%m%d')}.csv"
+        )
 
         # ✅ 关键修改：传入 target_date=yesterday_date
         await export_and_push_csv(
             chat_id,
             to_admin_if_no_group=True,
             file_name=file_name,
-            target_date=yesterday_date,  # 明确传递昨天日期
+            target_date=target_period_date,
         )
 
-        logger.info(f"✅ 群组 {chat_id} 昨日({yesterday_date}) 数据导出并推送完成")
+        logger.info(f"✅ 群组 {chat_id} 昨日 数据导出并推送完成")
 
     except asyncio.TimeoutError:
         logger.warning(f"⏰ 群组 {chat_id} 延迟导出超时")
