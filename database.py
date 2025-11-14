@@ -57,6 +57,7 @@ class PostgreSQLDatabase:
                 max_size=Config.DB_MAX_CONNECTIONS,
                 max_inactive_connection_lifetime=Config.DB_POOL_RECYCLE,
                 command_timeout=Config.DB_CONNECTION_TIMEOUT,
+                statement_cache_size=0,
             )
             logger.info("✅ PostgreSQL 连接池创建成功")
 
@@ -614,7 +615,7 @@ class PostgreSQLDatabase:
                             total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
-                            last_updated = $3,  
+                            last_updated = $3,  # 🆕 更新为新的日期
                             updated_at = CURRENT_TIMESTAMP
                         WHERE chat_id = $1 AND user_id = $2
                         """,
