@@ -1535,7 +1535,7 @@ async def cmd_set(message: types.Message):
 @admin_required
 @rate_limit(rate=5, per=30)
 async def cmd_reset(message: types.Message):
-    """重置用户数据 - 优化版本"""
+    """重置用户数据 - 修复版本"""
     args = message.text.split()
     if len(args) != 2:
         await message.answer(
@@ -1547,15 +1547,55 @@ async def cmd_reset(message: types.Message):
         return
 
     try:
-        uid = args[1]
+        uid = int(args[1])  # 🆕 确保转换为整数
         chat_id = message.chat.id
-        await db.reset_user_daily_data(chat_id, int(uid))
+
+        # 🆕 先检查用户是否存在
+        user_data = await db.get_user(chat_id, uid)
+        if not user_data:
+            await message.answer(
+                f"❌ 用户 <code>{uid}</code> 不存在",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        # 🆕 记录重置前的状态
+        before_count = user_data.get("total_activity_count", 0)
+        before_time = user_data.get("total_accumulated_time", 0)
+
+        # 执行重置
+        success = await db.reset_user_daily_data(chat_id, uid)
+
+        if success:
+            await message.answer(
+                f"✅ 已重置用户 <code>{uid}</code> 的今日数据\n"
+                f"📊 重置前状态:\n"
+                f"   • 活动次数: {before_count} 次\n"
+                f"   • 累计时长: {MessageFormatter.format_time(before_time)}\n"
+                f"   • 当前活动: {user_data.get('current_activity', '无')}",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"❌ 重置用户 <code>{uid}</code> 数据失败",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+
+    except ValueError:
         await message.answer(
-            f"✅ 已重置用户 <code>{uid}</code> 的今日数据",
+            "❌ 用户ID必须是数字",
             reply_markup=await get_main_keyboard(
                 chat_id=message.chat.id, show_admin=True
             ),
-            parse_mode="HTML",
         )
     except Exception as e:
         await message.answer(
