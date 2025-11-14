@@ -680,20 +680,25 @@ class PostgreSQLDatabase:
             logger.error(f"❌ 更新最后更新时间失败 {chat_id}-{user_id}: {e}")
 
     async def get_user_activity_count(
-        self, chat_id: int, user_id: int, activity: str
+        self, chat_id: int, user_id: int, activity: str, target_date: date = None
     ) -> int:
-        """获取用户今日活动次数"""
-        today = datetime.now().date()
+        """获取用户指定日期的活动次数"""
+        if target_date is None:
+            # 需要从外部传入正确的周期日期
+            raise ValueError("必须提供target_date参数")
+
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT activity_count FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3 AND activity_name = $4",
                 chat_id,
                 user_id,
-                today,
+                target_date,
                 activity,
             )
             count = row["activity_count"] if row else 0
-            logger.debug(f"📊 获取活动计数: 用户{user_id} 活动{activity} 计数{count}")
+            logger.debug(
+                f"📊 获取活动计数: 用户{user_id} 活动{activity} 日期{target_date} 计数{count}"
+            )
             return count
 
     async def get_user_activity_time(
@@ -712,16 +717,19 @@ class PostgreSQLDatabase:
             return row["accumulated_time"] if row else 0
 
     async def get_user_all_activities(
-        self, chat_id: int, user_id: int
+        self, chat_id: int, user_id: int, target_date: date = None
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据"""
-        today = datetime.now().date()
+        """获取用户指定日期的所有活动数据"""
+        if target_date is None:
+            # 需要从外部传入正确的周期日期
+            raise ValueError("必须提供target_date参数")
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
                 chat_id,
                 user_id,
-                today,
+                target_date,
             )
 
             activities = {}
@@ -1108,7 +1116,8 @@ class PostgreSQLDatabase:
     ) -> List[Dict]:
         """获取群组统计信息，按指定日期查询 - 修复重置后查询问题"""
         if target_date is None:
-            target_date = datetime.now().date()
+            # target_date = datetime.now().date()
+            raise ValueError("必须提供target_date参数")
 
         async with self.pool.acquire() as conn:
             # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
