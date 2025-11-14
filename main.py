@@ -213,37 +213,6 @@ class ActivityTimerManager:
     def get_stats(self):
         return {"active_timers": len(self._timers)}
 
-    async def cancel_all_timers(self):
-        """取消所有定时器 - 修复版本"""
-        try:
-            # 复制keys避免在迭代时修改字典
-            keys = list(self._timers.keys())
-            cancelled_count = 0
-
-            for key in keys:
-                if key in self._timers:
-                    task = self._timers[key]
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            # 这是预期的，任务被取消
-                            pass
-                        except Exception as e:
-                            logger.warning(f"⚠️ 取消定时器 {key} 时出现异常: {e}")
-
-                    # 从字典中移除
-                    del self._timers[key]
-                    cancelled_count += 1
-
-            logger.info(f"✅ 已取消所有定时器: {cancelled_count} 个")
-
-        except Exception as e:
-            logger.error(f"❌ 取消所有定时器时出错: {e}")
-            # 即使出错也要清空定时器字典
-            self._timers.clear()
-
 
 timer_manager = ActivityTimerManager()
 
@@ -423,7 +392,7 @@ class MessageFormatter:
     @staticmethod
     def create_dashed_line():
         """创建短虚线分割线"""
-        return MessageFormatter.format_copyable_text("-------------------------")
+        return "----------------------------------"
 
     @staticmethod
     def format_copyable_text(text: str):
@@ -1119,7 +1088,7 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
                         notif_text = (
                             f"🚨 <b>自动回座超时通知</b>\n"
                             f"🏢 群组：<code>{chat_title}</code>\n"
-                            f"{MessageFormatter.create_dashed_line()}\n"
+                            f"-------------------------------------\n"
                             f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                             f"📝 活动：<code>{act}</code>\n"
                             f"⏰ 回座时间：<code>{get_beijing_time().strftime('%m/%d %H:%M:%S')}</code>\n"
@@ -3074,7 +3043,7 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 notif_text = (
                     f"⚠️ <b>{action_text}{status_type}通知</b>\n"
                     f"🏢 群组：<code>{chat_title}</code>\n"
-                    f"{MessageFormatter.create_dashed_line()}\n"
+                    f"------------------------------------\n"
                     f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
                     f"⏰ 打卡时间：<code>{current_time}</code>\n"
                     f"📅 期望时间：<code>{expected_time_display}</code>\n"
@@ -3813,7 +3782,7 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
                     notif_text = (
                         f"🚨 <b>超时回座通知</b>\n"
                         f"🏢 群组：<code>{chat_title}</code>\n"
-                        f"{MessageFormatter.create_dashed_line()}\n"
+                        f"------------------------------------\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, user_data.get('nickname', '未知用户'))}\n"
                         f"📝 活动：<code>{act}</code>\n"
                         f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
@@ -4109,7 +4078,7 @@ async def export_monthly_csv(
             f"🏢 群组：<code>{chat_title}</code>\n"
             f"📅 统计月份：<code>{year}年{month}月</code>\n"
             f"⏰ 导出时间：<code>{get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-            f"{MessageFormatter.create_dashed_line()}\n"
+            f"----------------------------------\n"
             f"💾 包含每个用户的月度活动统计"
         )
 
@@ -4516,16 +4485,6 @@ async def handle_expired_activity(
         logger.error(f"❌ 处理过期活动失败 用户{user_id}: {e}")
 
 
-# ==================== 辅助函数优化 ====================
-async def get_chat_title(chat_id: int) -> str:
-    """获取群组标题 - 优化版本"""
-    try:
-        chat_info = await bot.get_chat(chat_id)
-        return chat_info.title or str(chat_id)
-    except Exception:
-        return str(chat_id)
-
-
 # ==================== 月度报告任务优化 ====================
 async def process_monthly_export_for_group(chat_id: int, year: int, month: int):
     """处理单个群组的月度导出 - 优化版本"""
@@ -4710,6 +4669,16 @@ async def health_monitoring_task():
         except Exception as e:
             logger.error(f"❌ 健康监控任务失败: {e}")
             await asyncio.sleep(60)
+
+
+# ==================== 辅助函数优化 ====================
+async def get_chat_title(chat_id: int) -> str:
+    """获取群组标题 - 优化版本"""
+    try:
+        chat_info = await bot.get_chat(chat_id)
+        return chat_info.title or str(chat_id)
+    except Exception:
+        return str(chat_id)
 
 
 # ==================== Render检查接口优化 ====================
