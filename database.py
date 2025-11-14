@@ -157,6 +157,7 @@ class PostgreSQLDatabase:
                     activity_name TEXT PRIMARY KEY,
                     max_times INTEGER,
                     time_limit INTEGER,
+                    max_users INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -680,25 +681,20 @@ class PostgreSQLDatabase:
             logger.error(f"❌ 更新最后更新时间失败 {chat_id}-{user_id}: {e}")
 
     async def get_user_activity_count(
-        self, chat_id: int, user_id: int, activity: str, target_date: date = None
+        self, chat_id: int, user_id: int, activity: str
     ) -> int:
-        """获取用户指定日期的活动次数"""
-        if target_date is None:
-            # 需要从外部传入正确的周期日期
-            raise ValueError("必须提供target_date参数")
-
+        """获取用户今日活动次数"""
+        today = datetime.now().date()
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT activity_count FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3 AND activity_name = $4",
                 chat_id,
                 user_id,
-                target_date,
+                today,
                 activity,
             )
             count = row["activity_count"] if row else 0
-            logger.debug(
-                f"📊 获取活动计数: 用户{user_id} 活动{activity} 日期{target_date} 计数{count}"
-            )
+            logger.debug(f"📊 获取活动计数: 用户{user_id} 活动{activity} 计数{count}")
             return count
 
     async def get_user_activity_time(
@@ -717,19 +713,16 @@ class PostgreSQLDatabase:
             return row["accumulated_time"] if row else 0
 
     async def get_user_all_activities(
-        self, chat_id: int, user_id: int, target_date: date = None
+        self, chat_id: int, user_id: int
     ) -> Dict[str, Dict]:
-        """获取用户指定日期的所有活动数据"""
-        if target_date is None:
-            # 需要从外部传入正确的周期日期
-            raise ValueError("必须提供target_date参数")
-
+        """获取用户所有活动数据"""
+        today = datetime.now().date()
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
                 chat_id,
                 user_id,
-                target_date,
+                today,
             )
 
             activities = {}
@@ -877,6 +870,7 @@ class PostgreSQLDatabase:
                 row["activity_name"]: {
                     "max_times": row["max_times"],
                     "time_limit": row["time_limit"],
+                    "max_users": row.get("max_users", 0),
                 }
                 for row in rows
             }
@@ -912,8 +906,18 @@ class PostgreSQLDatabase:
             )
             return row is not None
 
+    async def get_current_activity_users(self, chat_id: int, activity: str) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE chat_id = $1 AND current_activity = $2",
+                chat_id,
+                activity,
+            )
+            return count
+
     async def update_activity_config(
-        self, activity: str, max_times: int, time_limit: int
+        self, activity: str, max_times: int, time_limit: int, max_users: int = 0
     ):
         """更新活动配置 - 修复新增活动无法打卡问题"""
         async with self.pool.acquire() as conn:
@@ -921,17 +925,19 @@ class PostgreSQLDatabase:
                 # 更新或新增活动配置
                 await conn.execute(
                     """
-                    INSERT INTO activity_configs (activity_name, max_times, time_limit)
+                    INSERT INTO activity_configs (activity_name, max_times, time_limit,max_users)
                     VALUES ($1, $2, $3)
                     ON CONFLICT (activity_name) 
                     DO UPDATE SET 
                         max_times = EXCLUDED.max_times,
                         time_limit = EXCLUDED.time_limit,
+                        max_users = EXCLUDED.max_users,
                         created_at = CURRENT_TIMESTAMP
                     """,
                     activity,
                     max_times,
                     time_limit,
+                    max_users,
                 )
 
                 # ✅ 初始化默认罚款配置，避免新增活动无法打卡
@@ -954,7 +960,7 @@ class PostgreSQLDatabase:
 
             # 清理缓存
             self._cache.pop("activity_limits", None)
-            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
+            logger.info(f"✅ 活动配置更新完成: {activity}，人数限制: {max_users}")
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -1116,8 +1122,7 @@ class PostgreSQLDatabase:
     ) -> List[Dict]:
         """获取群组统计信息，按指定日期查询 - 修复重置后查询问题"""
         if target_date is None:
-            # target_date = datetime.now().date()
-            raise ValueError("必须提供target_date参数")
+            target_date = datetime.now().date()
 
         async with self.pool.acquire() as conn:
             # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
