@@ -1535,7 +1535,7 @@ async def cmd_set(message: types.Message):
 @admin_required
 @rate_limit(rate=5, per=30)
 async def cmd_reset(message: types.Message):
-    """重置用户数据 - 修复版本"""
+    """重置用户数据 - 优化版本"""
     args = message.text.split()
     if len(args) != 2:
         await message.answer(
@@ -1547,55 +1547,15 @@ async def cmd_reset(message: types.Message):
         return
 
     try:
-        uid = int(args[1])  # 🆕 确保转换为整数
+        uid = args[1]
         chat_id = message.chat.id
-
-        # 🆕 先检查用户是否存在
-        user_data = await db.get_user(chat_id, uid)
-        if not user_data:
-            await message.answer(
-                f"❌ 用户 <code>{uid}</code> 不存在",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-                parse_mode="HTML",
-            )
-            return
-
-        # 🆕 记录重置前的状态
-        before_count = user_data.get("total_activity_count", 0)
-        before_time = user_data.get("total_accumulated_time", 0)
-
-        # 执行重置
-        success = await db.reset_user_daily_data(chat_id, uid)
-
-        if success:
-            await message.answer(
-                f"✅ 已重置用户 <code>{uid}</code> 的今日数据\n"
-                f"📊 重置前状态:\n"
-                f"   • 活动次数: {before_count} 次\n"
-                f"   • 累计时长: {MessageFormatter.format_time(before_time)}\n"
-                f"   • 当前活动: {user_data.get('current_activity', '无')}",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-                parse_mode="HTML",
-            )
-        else:
-            await message.answer(
-                f"❌ 重置用户 <code>{uid}</code> 数据失败",
-                reply_markup=await get_main_keyboard(
-                    chat_id=message.chat.id, show_admin=True
-                ),
-                parse_mode="HTML",
-            )
-
-    except ValueError:
+        await db.reset_user_daily_data(chat_id, int(uid))
         await message.answer(
-            "❌ 用户ID必须是数字",
+            f"✅ 已重置用户 <code>{uid}</code> 的今日数据",
             reply_markup=await get_main_keyboard(
                 chat_id=message.chat.id, show_admin=True
             ),
+            parse_mode="HTML",
         )
     except Exception as e:
         await message.answer(
@@ -2083,7 +2043,7 @@ async def cmd_delwork(message: types.Message):
     )
 
     # 🆕 清理用户缓存，确保立即生效
-    group_members = await db.get_group_members(chat_id)
+    group_members = await db.get_group_members(chat_id, only_today=False)
     for user_data in group_members:
         user_id = user_data["user_id"]
         db._cache.pop(f"user:{chat_id}:{user_id}", None)
@@ -2150,7 +2110,7 @@ async def cmd_delwork_clear(message: types.Message):
         await db.release_connection(conn)
 
     # 🆕 补充：清理用户缓存，确保立即生效
-    group_members = await db.get_group_members(chat_id)
+    group_members = await db.get_group_members(chat_id, only_today=False)
     for user_data in group_members:
         user_id = user_data["user_id"]
         db._cache.pop(f"user:{chat_id}:{user_id}", None)
@@ -4358,16 +4318,17 @@ async def daily_reset_task():
                     yesterday = now - timedelta(days=1)
 
                     # 执行每日数据重置（带用户锁防并发）
-                    group_members = await db.get_group_members(chat_id)
-                    for user_data in group_members:
-                        user_lock = get_user_lock(chat_id, user_data["user_id"])
-                        async with user_lock:
-                            # 🆕 关键修复：传递昨天的日期
-                            await db.reset_user_daily_data(
-                                chat_id,
-                                user_data["user_id"],
-                                yesterday.date(),  # 🆕 传递昨天的日期
-                            )
+                # 执行每日数据重置（带用户锁防并发）
+                # 使用 include_all/only_today=False 来确保所有用户都被重置
+                group_members = await db.get_group_members(chat_id, only_today=False)
+                for user_data in group_members:
+                    user_lock = get_user_lock(chat_id, user_data["user_id"])
+                    async with user_lock:
+                        await db.reset_user_daily_data(
+                            chat_id,
+                            user_data["user_id"],
+                            yesterday.date(),  # 传递昨天的日期用于导出/记录
+                        )
 
                     logger.info(f"✅ 群组 {chat_id} 数据重置完成")
 
