@@ -4536,7 +4536,7 @@ async def daily_reset_task():
                             )
                             await db.update_user_last_updated(chat_id, uid, now.date())
                             # 清除正在进行的活动（确保当天无挂起）
-                            await db.clear_current_activity(chat_id, uid)
+                            await db.clear_user_cache(chat_id, uid)
 
                     # ====== 清理当日上下班打卡 ======
                     await db.clear_today_work_records(chat_id)
