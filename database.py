@@ -735,16 +735,25 @@ class PostgreSQLDatabase:
             return row["accumulated_time"] if row else 0
 
     async def get_user_all_activities(
-        self, chat_id: int, user_id: int
+        self, chat_id: int, user_id: int, target_date: date | None = None
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据"""
-        today = beijing_today()
+        """
+        获取用户活动数据，可指定日期（由管理员传入）
+        如果 target_date 为 None，则默认使用当天
+        """
+        if target_date is None:
+            target_date = beijing_today()
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
+                """
+                SELECT activity_name, activity_count, accumulated_time
+                FROM user_activities
+                WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3
+                """,
                 chat_id,
                 user_id,
-                today,
+                target_date,
             )
 
             activities = {}
