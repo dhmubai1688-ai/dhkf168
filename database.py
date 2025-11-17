@@ -661,6 +661,21 @@ class PostgreSQLDatabase:
             logger.error(f"❌ 重置用户数据失败 {chat_id}-{user_id}: {e}")
             return False
 
+    async def clear_user_cache(self, chat_id: int, user_id: int):
+        """清除用户缓存（无论是内存 cache 还是 redis cache）"""
+        key = f"user:{chat_id}:{user_id}"
+
+        # 内存缓存
+        if hasattr(self, "user_cache"):
+            self.user_cache.pop(key, None)
+
+        # Redis 缓存
+        if hasattr(self, "redis"):
+            try:
+                await self.redis.delete(key)
+            except Exception as e:
+                logger.warning(f"⚠️ Redis 缓存删除失败: {e}")
+
     async def update_user_last_updated(
         self, chat_id: int, user_id: int, date_obj: date
     ):
