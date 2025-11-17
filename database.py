@@ -20,8 +20,6 @@ def beijing_today():
     return beijing_now().date()
 
 
-
-
 # ====================================
 #    新增：按管理员重置时间计算周期日期
 # ====================================
@@ -738,6 +736,43 @@ class PostgreSQLDatabase:
                 await self.redis.delete(key)
             except Exception as e:
                 logger.warning(f"⚠️ Redis 缓存删除失败: {e}")
+
+    async def clear_current_activity(self, chat_id: int, user_id: int):
+        """清除用户的当前活动状态"""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users 
+                    SET current_activity = NULL, 
+                        activity_start_time = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE chat_id = $1 AND user_id = $2
+                    """,
+                    chat_id,
+                    user_id,
+                )
+
+            # 清理缓存
+            self._cache.pop(f"user:{chat_id}:{user_id}", None)
+            logger.debug(f"✅ 已清除用户 {user_id} 的当前活动状态")
+
+        except Exception as e:
+            logger.error(f"❌ 清除用户活动状态失败 {chat_id}-{user_id}: {e}")
+
+    async def clear_today_work_records(self, chat_id: int):
+        """清除当日的上下班记录"""
+        try:
+            period_date = await self.get_period_date(chat_id)
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM work_records WHERE chat_id = $1 AND record_date = $2",
+                    chat_id,
+                    period_date,
+                )
+            logger.info(f"✅ 已清除群组 {chat_id} 的当日上下班记录")
+        except Exception as e:
+            logger.error(f"❌ 清除当日上下班记录失败 {chat_id}: {e}")
 
     async def update_user_last_updated(
         self, chat_id: int, user_id: int, date_obj: date
