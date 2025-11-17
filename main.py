@@ -80,6 +80,7 @@ bot = Bot(token=Config.TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
+
 # ==================== 优化的并发安全机制 ====================
 class UserLockManager:
     """优化的用户锁管理器 - 防止内存泄漏"""
@@ -736,6 +737,30 @@ async def reset_daily_data_if_needed(chat_id: int, uid: int):
             await db.update_user_last_updated(chat_id, uid, datetime.now().date())
         except Exception as init_error:
             logger.error(f"❌ 用户初始化也失败: {init_error}")
+
+
+# ========== 计算周期 =========
+async def get_period_date(chat_id: int):
+    """
+    根据 reset_hour/minute 计算当前应属于哪个周期日期（period_date）
+    """
+    now = get_beijing_time()
+    group = await db.get_group_cached(chat_id)
+    if not group:
+        await db.init_group(chat_id)
+        group = await db.get_group_cached(chat_id)
+
+    reset_hour = group.get("reset_hour", Config.DAILY_RESET_HOUR)
+    reset_minute = group.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+    reset_time_today = now.replace(
+        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+    )
+
+    if now < reset_time_today:
+        return (reset_time_today - timedelta(days=1)).date()
+    else:
+        return reset_time_today.date()
 
 
 async def check_activity_limit(chat_id: int, uid: int, act: str):
@@ -4509,9 +4534,7 @@ async def daily_reset_task():
                                 uid,
                                 now.date(),  # ⬅️ 关键修复：重置到“今天”
                             )
-                            await db.update_user_last_updated(
-                                chat_id, uid, now.date()
-                            )
+                            await db.update_user_last_updated(chat_id, uid, now.date())
                             # 清除正在进行的活动（确保当天无挂起）
                             await db.clear_current_activity(chat_id, uid)
 
@@ -4535,7 +4558,6 @@ async def daily_reset_task():
                 logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
 
         await asyncio.sleep(60)
-
 
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
