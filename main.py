@@ -2377,7 +2377,7 @@ async def cmd_reset_work(message: types.Message):
 
     try:
         target_uid = int(args[1])
-        today = datetime.now().date()
+        today = get_beijing_time().date()
 
         # 删除用户今日的上下班记录
         async with db.pool.acquire() as conn:
@@ -3475,25 +3475,186 @@ async def handle_other_text_messages(message: types.Message):
 
 
 # ==================== 用户功能优化 ====================
+# async def show_history(message: types.Message):
+#     """显示用户历史记录 - 优化版本"""
+#     chat_id = message.chat.id
+#     uid = message.from_user.id
+
+#     async with OptimizedUserContext(chat_id, uid) as user:
+#         first_line = (
+#             f"👤 用户：{MessageFormatter.format_user_link(uid, user['nickname'])}"
+#         )
+#         text = f"{first_line}\n📊 今日记录：\n\n"
+
+#         has_records = False
+#         activity_limits = await db.get_activity_limits_cached()
+#         user_activities = await db.get_user_all_activities(
+#             chat_id, uid, target_date=get_beijing_time().date()
+#         )
+
+#         for act in activity_limits.keys():
+#             activity_info = user_activities.get(act, {})
+#             total_time = activity_info.get("time", 0)
+#             count = activity_info.get("count", 0)
+#             max_times = activity_limits[act]["max_times"]
+#             if total_time > 0 or count > 0:
+#                 status = "✅" if count < max_times else "❌"
+#                 time_str = MessageFormatter.format_time(int(total_time))
+#                 text += f"• <code>{act}</code>：<code>{time_str}</code>，次数：<code>{count}</code>/<code>{max_times}</code> {status}\n"
+#                 has_records = True
+
+#         total_time_all = user.get("total_accumulated_time", 0)
+#         total_count_all = user.get("total_activity_count", 0)
+#         total_fine = user.get("total_fines", 0)
+#         overtime_count = user.get("overtime_count", 0)
+#         total_overtime = user.get("total_overtime_time", 0)
+
+#         text += f"\n📈 今日总统计：\n"
+#         text += f"• 总累计时间：<code>{MessageFormatter.format_time(int(total_time_all))}</code>\n"
+#         text += f"• 总活动次数：<code>{total_count_all}</code> 次\n"
+#         if overtime_count > 0:
+#             text += f"• 超时次数：<code>{overtime_count}</code> 次\n"
+#             text += f"• 总超时时间：<code>{MessageFormatter.format_time(int(total_overtime))}</code>\n"
+#         if total_fine > 0:
+#             text += f"• 累计罚款：<code>{total_fine}</code> 元"
+
+#         if not has_records and total_count_all == 0:
+#             text += "暂无记录，请先进行打卡活动"
+
+#         await message.answer(
+#             text,
+#             reply_markup=await get_main_keyboard(
+#                 chat_id=chat_id, show_admin=await is_admin(uid)
+#             ),
+#             parse_mode="HTML",
+#         )
+
+
+# async def show_rank(message: types.Message):
+#     """显示排行榜（修复版）——直接从 user_activities 聚合当天数据，避免依赖 last_updated"""
+#     chat_id = message.chat.id
+#     uid = message.from_user.id
+
+#     # 确保群组初始化（如果你 init_group 有副作用）
+#     await db.init_group(chat_id)
+
+#     # 读取活动列表（带缓存）
+#     activity_limits = await db.get_activity_limits_cached()
+#     if not activity_limits:
+#         await message.answer(
+#             "⚠️ 当前没有配置任何活动，无法生成排行榜。",
+#             reply_markup=await get_main_keyboard(
+#                 chat_id=chat_id, show_admin=await is_admin(uid)
+#             ),
+#         )
+#         return
+
+#     # 准备文本头
+#     rank_text = "🏆 今日活动排行榜\n\n"
+#     today = get_beijing_time().date()
+
+#     # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
+#     top_n = 3
+#     async with db.pool.acquire() as conn:
+#         any_result = False
+#         for act in activity_limits.keys():
+#             rows = await conn.fetch(
+#                 """
+#                 SELECT
+#                     u.user_id,
+#                     u.nickname,
+#                     ua.accumulated_time as total_time
+#                 FROM user_activities ua
+#                 JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
+#                 WHERE ua.chat_id = $1 AND ua.activity_name = $2 AND ua.activity_date = $3
+#                 ORDER BY ua.accumulated_time DESC
+#                 LIMIT $4
+#                 """,
+#                 chat_id,
+#                 act,
+#                 today,
+#                 top_n,
+#             )
+
+#             if not rows:
+#                 # 跳过没有数据的活动（也可以显示“暂无记录”）
+#                 continue
+
+#             any_result = True
+#             rank_text += f"📈 <code>{act}</code>：\n"
+#             for i, row in enumerate(rows, start=1):
+#                 user_id = row["user_id"]
+#                 name = row["nickname"] or str(user_id)
+#                 time_sec = row["total_time"] or 0
+#                 # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
+#                 # 这里尽量使用项目里已有的工具：
+#                 try:
+#                     time_str = MessageFormatter.format_time(int(time_sec))
+#                 except Exception:
+#                     # 兜底格式化为秒->时分秒
+#                     time_str = (
+#                         db.format_seconds_to_hms(int(time_sec))
+#                         if hasattr(db, "format_seconds_to_hms")
+#                         else f"{int(time_sec)}s"
+#                     )
+
+#                 rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - <code>{time_str}</code>\n"
+#             rank_text += "\n"
+
+#     if not any_result:
+#         rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
+
+#     await message.answer(
+#         rank_text,
+#         reply_markup=await get_main_keyboard(
+#             chat_id=chat_id, show_admin=await is_admin(uid)
+#         ),
+#         parse_mode="HTML",
+#     )
+
+
 async def show_history(message: types.Message):
-    """显示用户历史记录 - 优化版本"""
+    """显示用户历史记录 - 优化版本（增强鲁棒性与调试日志）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
     async with OptimizedUserContext(chat_id, uid) as user:
-        first_line = (
-            f"👤 用户：{MessageFormatter.format_user_link(uid, user['nickname'])}"
-        )
+        # 兜底 user / nickname
+        if not user:
+            user = {
+                "nickname": str(uid),
+                "total_accumulated_time": 0,
+                "total_activity_count": 0,
+                "total_fines": 0,
+                "overtime_count": 0,
+                "total_overtime_time": 0,
+            }
+        nickname = user.get("nickname") or str(uid)
+
+        first_line = f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}"
         text = f"{first_line}\n📊 今日记录：\n\n"
 
         has_records = False
         activity_limits = await db.get_activity_limits_cached()
-        user_activities = await db.get_user_all_activities(chat_id, uid)
+
+        # 调试日志：记录今天日期
+        today = get_beijing_time().date()
+        logger.debug(f"[show_history] chat_id={chat_id} uid={uid} today={today}")
+
+        # 拉取当日活动明细（兜底 None -> {}）
+        user_activities = (
+            await db.get_user_all_activities(chat_id, uid, target_date=today) or {}
+        )
+
+        # 调试：打印查询结果简要信息
+        logger.debug(
+            f"[show_history] user_activities keys: {list(user_activities.keys())}"
+        )
 
         for act in activity_limits.keys():
             activity_info = user_activities.get(act, {})
-            total_time = activity_info.get("time", 0)
-            count = activity_info.get("count", 0)
+            total_time = activity_info.get("time", 0) or 0
+            count = activity_info.get("count", 0) or 0
             max_times = activity_limits[act]["max_times"]
             if total_time > 0 or count > 0:
                 status = "✅" if count < max_times else "❌"
@@ -3501,11 +3662,17 @@ async def show_history(message: types.Message):
                 text += f"• <code>{act}</code>：<code>{time_str}</code>，次数：<code>{count}</code>/<code>{max_times}</code> {status}\n"
                 has_records = True
 
-        total_time_all = user.get("total_accumulated_time", 0)
-        total_count_all = user.get("total_activity_count", 0)
-        total_fine = user.get("total_fines", 0)
-        overtime_count = user.get("overtime_count", 0)
-        total_overtime = user.get("total_overtime_time", 0)
+        # 从 users 表读取的累计字段（注意单位）
+        total_time_all = int(user.get("total_accumulated_time", 0) or 0)
+        total_count_all = int(user.get("total_activity_count", 0) or 0)
+        total_fine = int(user.get("total_fines", 0) or 0)
+        overtime_count = int(user.get("overtime_count", 0) or 0)
+        total_overtime = int(user.get("total_overtime_time", 0) or 0)
+
+        # 调试：打印 users 表读取值
+        logger.debug(
+            f"[show_history] totals: time={total_time_all} count={total_count_all} fines={total_fine} overtime_count={overtime_count} total_overtime={total_overtime}"
+        )
 
         text += f"\n📈 今日总统计：\n"
         text += f"• 总累计时间：<code>{MessageFormatter.format_time(int(total_time_all))}</code>\n"
@@ -3517,7 +3684,7 @@ async def show_history(message: types.Message):
             text += f"• 累计罚款：<code>{total_fine}</code> 元"
 
         if not has_records and total_count_all == 0:
-            text += "暂无记录，请先进行打卡活动"
+            text += "\n暂无记录，请先进行打卡活动"
 
         await message.answer(
             text,
@@ -3549,7 +3716,8 @@ async def show_rank(message: types.Message):
 
     # 准备文本头
     rank_text = "🏆 今日活动排行榜\n\n"
-    today = datetime.now().date()
+    today = get_beijing_time().date()
+    logger.debug(f"[show_rank] chat_id={chat_id} today={today}")
 
     # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
     top_n = 3
@@ -3574,6 +3742,9 @@ async def show_rank(message: types.Message):
                 top_n,
             )
 
+            # 调试：记录每个活动查询到的行数
+            logger.debug(f"[show_rank] act={act} rows={len(rows)}")
+
             if not rows:
                 # 跳过没有数据的活动（也可以显示“暂无记录”）
                 continue
@@ -3584,12 +3755,10 @@ async def show_rank(message: types.Message):
                 user_id = row["user_id"]
                 name = row["nickname"] or str(user_id)
                 time_sec = row["total_time"] or 0
-                # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
-                # 这里尽量使用项目里已有的工具：
+
                 try:
                     time_str = MessageFormatter.format_time(int(time_sec))
                 except Exception:
-                    # 兜底格式化为秒->时分秒
                     time_str = (
                         db.format_seconds_to_hms(int(time_sec))
                         if hasattr(db, "format_seconds_to_hms")
@@ -4286,10 +4455,10 @@ async def auto_daily_export_task():
 
 async def daily_reset_task():
     """
-    每日自动重置任务（重置 + 延迟导出昨日数据）- 完整修复版
+    每日自动重置任务（重置 + 延迟导出昨日数据）- 最终稳定版
     """
 
-    # 防止同一分钟重复执行（例如网络卡顿 / 任务重启）
+    # 防止同一分钟重复执行
     last_reset_key = {}  # {chat_id: "YYYY-MM-DD HH:MM"}
 
     while True:
@@ -4312,56 +4481,54 @@ async def daily_reset_task():
                     continue
 
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
-                reset_minute = group_data.get(
-                    "reset_minute", Config.DAILY_RESET_MINUTE
-                )
+                reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # ====== 判断是否到了重置时间 ======
+                # 是否到达重置时间
                 if now.hour == reset_hour and now.minute == reset_minute:
 
-                    # ====== 防止同一分钟重复执行 ======
+                    # 防止同一分钟重复重置
                     reset_key = now.strftime("%Y-%m-%d %H:%M")
                     if last_reset_key.get(chat_id) == reset_key:
-                        logger.info(
-                            f"⏳ 群组 {chat_id} 已在同一分钟执行过重置，跳过重复执行"
-                        )
+                        logger.info(f"⏳ 群组 {chat_id} 已在本分钟执行过重置，跳过")
                         continue
+
                     last_reset_key[chat_id] = reset_key
+                    logger.info(f"⏰ 开始重置群组 {chat_id} ...")
 
-                    logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
+                    yesterday = now.date() - timedelta(days=1)
 
-                    yesterday = now - timedelta(days=1)
-
-                    # ====== 获取所有群成员（包含未打卡的） ======
+                    # 获取所有成员（包含未打卡的）
                     group_members = await db.get_group_members(
                         chat_id, only_today=False
                     )
 
-                    # ====== 执行用户级重置，附带用户锁 ======
+                    # 执行用户级重置
                     for user_data in group_members:
-                        user_lock = get_user_lock(chat_id, user_data["user_id"])
+                        user_id = user_data["user_id"]
+
+                        user_lock = get_user_lock(chat_id, user_id)
                         async with user_lock:
                             await db.reset_user_daily_data(
                                 chat_id,
-                                user_data["user_id"],
-                                yesterday.date(),
+                                user_id,
+                                yesterday,  # 昨日统计日期，用于导出
                             )
 
-                    logger.info(f"✅ 群组 {chat_id} 数据重置完成")
+                            # 🚨 必须清缓存，否则重置后显示旧数据！
+                            await db.clear_user_cache(chat_id, user_id)
 
-                    # ====== 启动延迟导出任务 ======
+                    logger.info(f"✅ 群组 {chat_id} 重置已完成")
+
+                    # 延迟导出任务
                     asyncio.create_task(delayed_export(chat_id, 30))
-                    logger.info(
-                        f"📤 群组 {chat_id} 已安排延迟导出任务（30 分钟后执行）"
-                    )
+                    logger.info(f"📤 群组 {chat_id} 已安排 30 分钟后执行自动导出")
 
             except asyncio.TimeoutError:
-                logger.warning(f"⏰ 群组 {chat_id} 重置或查询超时，跳过。")
+                logger.warning(f"⏰ 群组 {chat_id} 重置超时")
             except Exception as e:
                 logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
 
-        await asyncio.sleep(60)  # 每分钟检查一次
-
+        await asyncio.sleep(60)
 
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
