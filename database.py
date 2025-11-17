@@ -8,7 +8,6 @@ from config import Config, beijing_tz
 import asyncpg
 from asyncpg.pool import Pool
 from datetime import date, datetime
-from utils import beijing_today, beijing_now
 
 
 logger = logging.getLogger("GroupCheckInBot")
