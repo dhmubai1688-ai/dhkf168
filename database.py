@@ -7,7 +7,6 @@ from typing import Dict, Any, List, Optional
 from config import Config, beijing_tz
 import asyncpg
 from asyncpg.pool import Pool
-from datetime import date, datetime
 
 
 logger = logging.getLogger("GroupCheckInBot")
@@ -19,6 +18,8 @@ def beijing_now():
 
 def beijing_today():
     return beijing_now().date()
+
+
 
 
 # ====================================
@@ -351,6 +352,30 @@ class PostgreSQLDatabase:
         await self.get_fine_rates()
 
         logger.info("🔄 活动配置缓存已强制刷新")
+
+    async def get_period_date(self, chat_id: int):
+        """
+        根据 reset_hour/minute 计算当前应属于哪个周期日期（period_date）
+        """
+        now = beijing_now()
+        group = await self.get_group_cached(chat_id)
+        if not group:
+            await self.init_group(chat_id)
+            group = await self.get_group_cached(chat_id)
+
+        reset_hour = group.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        reset_time_today = now.replace(
+            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+        )
+
+        if now < reset_time_today:
+            # 还没到重置点 → 属于昨天周期
+            return (reset_time_today - timedelta(days=1)).date()
+        else:
+            # 已经过了重置点 → 属于今天周期
+            return reset_time_today.date()
 
         # ========== 群组相关操作 ==========
 
