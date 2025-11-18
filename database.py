@@ -652,12 +652,11 @@ class PostgreSQLDatabase:
         🔄 修复版：按管理员设置的重置时间进行周期重置
         只重置累计统计和当前状态，不删除历史记录
         """
-
         try:
             # ⭐ 使用周期日期，而不是自然日
             period_date = await self.get_period_date(chat_id)
 
-            # 如果传入了 target_date（例如昨天），则保留逻辑
+            # 🆕 关键修复：正确处理 target_date
             if target_date is None:
                 reset_to_date = period_date
             else:
@@ -666,8 +665,8 @@ class PostgreSQLDatabase:
                         f"target_date必须是date类型，得到: {type(target_date)}"
                     )
 
-                # 如果 target_date 是昨天，而现在跨周期，则 last_updated 应该变为周期日期
-                reset_to_date = period_date
+                # 🆕 重要修改：使用传入的 target_date
+                reset_to_date = target_date
 
             # 读取旧状态，仅用于记录日志
             user_before = await self.get_user(chat_id, user_id)
@@ -691,7 +690,18 @@ class PostgreSQLDatabase:
                         """,
                         chat_id,
                         user_id,
-                        reset_to_date,  # ⭐ 必须使用周期日期
+                        reset_to_date,  # ⭐ 使用正确的日期
+                    )
+
+                    # 🆕 关键修复：在同一个事务中重置 user_activities 表中的数据
+                    await conn.execute(
+                        """
+                        DELETE FROM user_activities 
+                        WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3
+                        """,
+                        chat_id,
+                        user_id,
+                        reset_to_date,
                     )
 
             # 清理缓存
@@ -707,7 +717,7 @@ class PostgreSQLDatabase:
             # 日志输出
             logger.info(
                 f"♻ 周期重置完成: 用户 {user_id} (群 {chat_id})\n"
-                f"   📅 使用周期日期: {reset_to_date}\n"
+                f"   📅 重置到日期: {reset_to_date}\n"
                 f"   📊 之前状态:\n"
                 f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
                 f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0} 秒\n"
