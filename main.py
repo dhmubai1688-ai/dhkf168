@@ -4351,7 +4351,7 @@ async def daily_reset_task():
                             await db.reset_user_daily_data(
                                 chat_id,
                                 user_data["user_id"],
-                                reset_date.date(),  # 🆕 传递昨天的日期
+                                reset_date,  # 🆕 传递昨天的日期
                             )
 
                     logger.info(f"✅ 群组 {chat_id} 数据重置完成")
