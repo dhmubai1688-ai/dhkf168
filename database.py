@@ -599,10 +599,6 @@ class PostgreSQLDatabase:
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 🆕 关键修改：不再删除历史记录！
-                    # ❌ 删除这2个DELETE操作：
-                    # - 不要删除 user_activities 记录（保留导出所需的历史数据）
-                    # - 不要删除 work_records 记录（保留上下班打卡历史）
 
                     # 3. 只重置用户统计数据和状态
                     await conn.execute(
@@ -682,7 +678,7 @@ class PostgreSQLDatabase:
     async def get_user_activity_count(
         self, chat_id: int, user_id: int, activity: str
     ) -> int:
-        """获取用户今日活动次数"""
+        """获取用户今日活动次数 - 修复版本"""
         today = datetime.now().date()
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -699,7 +695,7 @@ class PostgreSQLDatabase:
     async def get_user_activity_time(
         self, chat_id: int, user_id: int, activity: str
     ) -> int:
-        """获取用户今日活动累计时间"""
+        """获取用户今日活动累计时间 - 修复版本"""
         today = datetime.now().date()
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -714,7 +710,7 @@ class PostgreSQLDatabase:
     async def get_user_all_activities(
         self, chat_id: int, user_id: int
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据"""
+        """获取用户所有活动数据 - 修复版本"""
         today = datetime.now().date()
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
@@ -1103,6 +1099,7 @@ class PostgreSQLDatabase:
             self._cache.pop("push_settings", None)
 
     # ========== 统计和导出相关 ==========
+
     async def get_group_statistics(
         self, chat_id: int, target_date: Optional[date] = None
     ) -> List[Dict]:
@@ -1432,6 +1429,7 @@ class PostgreSQLDatabase:
             return result
 
     # ========== 月度工作统计 ==========
+
     async def get_monthly_activity_ranking(
         self, chat_id: int, year: int = None, month: int = None
     ) -> Dict[str, List]:
@@ -1647,6 +1645,32 @@ class PostgreSQLDatabase:
             return f"{minutes}分{secs}秒"
         else:
             return f"{secs}秒"
+
+    async def update_user_last_updated(
+        self, chat_id: int, user_id: int, date_obj: date
+    ):
+        """
+        更新用户最后更新时间
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users 
+                    SET last_updated = $1, updated_at = CURRENT_TIMESTAMP 
+                    WHERE chat_id = $2 AND user_id = $3
+                    """,
+                    date_obj,
+                    chat_id,
+                    user_id,
+                )
+
+            # 清理用户缓存
+            self._cache.pop(f"user:{chat_id}:{user_id}", None)
+            logger.debug(f"✅ 更新最后更新时间: {chat_id}-{user_id} -> {date_obj}")
+
+        except Exception as e:
+            logger.error(f"❌ 更新最后更新时间失败 {chat_id}-{user_id}: {e}")
 
     # ========== 健康检查与监控 ==========
     async def connection_health_check(self) -> bool:
