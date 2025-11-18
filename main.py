@@ -3498,19 +3498,25 @@ async def handle_other_text_messages(message: types.Message):
 
 # ==================== 用户功能优化 ====================
 async def show_history(message: types.Message):
-    """显示用户历史记录 - 优化版本"""
+    """显示用户历史记录 - 修复重置时间版本"""
     chat_id = message.chat.id
     uid = message.from_user.id
+
+    # 🆕 关键修复：使用重置周期日期
+    period_start = await get_period_start(chat_id)
+    target_date = period_start.date()
 
     async with OptimizedUserContext(chat_id, uid) as user:
         first_line = (
             f"👤 用户：{MessageFormatter.format_user_link(uid, user['nickname'])}"
         )
-        text = f"{first_line}\n📊 今日记录：\n\n"
+        text = f"{first_line}\n📊 今日记录 (周期: {target_date})：\n\n"
 
         has_records = False
         activity_limits = await db.get_activity_limits_cached()
-        user_activities = await db.get_user_all_activities(chat_id, uid)
+
+        # 🆕 使用重置周期日期获取用户活动（使用修改后的现有方法）
+        user_activities = await db.get_user_all_activities(chat_id, uid, target_date)
 
         for act in activity_limits.keys():
             activity_info = user_activities.get(act, {})
@@ -3523,13 +3529,14 @@ async def show_history(message: types.Message):
                 text += f"• <code>{act}</code>：<code>{time_str}</code>，次数：<code>{count}</code>/<code>{max_times}</code> {status}\n"
                 has_records = True
 
+        # 🆕 使用用户当前数据（已经在 OptimizedUserContext 中获取）
         total_time_all = user.get("total_accumulated_time", 0)
         total_count_all = user.get("total_activity_count", 0)
         total_fine = user.get("total_fines", 0)
         overtime_count = user.get("overtime_count", 0)
         total_overtime = user.get("total_overtime_time", 0)
 
-        text += f"\n📈 今日总统计：\n"
+        text += f"\n📈 今日总统计 (周期: {target_date})：\n"
         text += f"• 总累计时间：<code>{MessageFormatter.format_time(int(total_time_all))}</code>\n"
         text += f"• 总活动次数：<code>{total_count_all}</code> 次\n"
         if overtime_count > 0:
@@ -3551,12 +3558,19 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（修复版）——直接从 user_activities 聚合当天数据，避免依赖 last_updated"""
+    """显示排行榜 - 修复重置时间版本"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    # 确保群组初始化（如果你 init_group 有副作用）
+    # 确保群组初始化
     await db.init_group(chat_id)
+
+    # 🆕 关键修复：使用重置周期开始日期，而不是当前日期
+    period_start = await get_period_start(chat_id)
+    target_date = period_start.date()
+
+    # 🆕 定义 top_n
+    top_n = 3
 
     # 读取活动列表（带缓存）
     activity_limits = await db.get_activity_limits_cached()
@@ -3570,11 +3584,9 @@ async def show_rank(message: types.Message):
         return
 
     # 准备文本头
-    rank_text = "🏆 今日活动排行榜\n\n"
-    today = datetime.now().date()
+    rank_text = f"🏆 今日活动排行榜 (周期: {target_date})\n\n"
 
-    # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
-    top_n = 3
+    # 🆕 使用重置周期日期进行查询
     async with db.pool.acquire() as conn:
         any_result = False
         for act in activity_limits.keys():
@@ -3592,12 +3604,11 @@ async def show_rank(message: types.Message):
                 """,
                 chat_id,
                 act,
-                today,
+                target_date,  # 🆕 使用重置周期日期
                 top_n,
             )
 
             if not rows:
-                # 跳过没有数据的活动（也可以显示“暂无记录”）
                 continue
 
             any_result = True
@@ -3606,23 +3617,13 @@ async def show_rank(message: types.Message):
                 user_id = row["user_id"]
                 name = row["nickname"] or str(user_id)
                 time_sec = row["total_time"] or 0
-                # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
-                # 这里尽量使用项目里已有的工具：
-                try:
-                    time_str = MessageFormatter.format_time(int(time_sec))
-                except Exception:
-                    # 兜底格式化为秒->时分秒
-                    time_str = (
-                        db.format_seconds_to_hms(int(time_sec))
-                        if hasattr(db, "format_seconds_to_hms")
-                        else f"{int(time_sec)}s"
-                    )
+                time_str = MessageFormatter.format_time(int(time_sec))
 
                 rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - <code>{time_str}</code>\n"
             rank_text += "\n"
 
     if not any_result:
-        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
+        rank_text = f"🏆 今日活动排行榜 (周期: {target_date})\n\n暂时没有任何活动记录，大家快去打卡吧！"
 
     await message.answer(
         rank_text,
