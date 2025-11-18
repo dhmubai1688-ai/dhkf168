@@ -1774,4 +1774,3 @@ class PostgreSQLDatabase:
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
-
