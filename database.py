@@ -650,7 +650,7 @@ class PostgreSQLDatabase:
     ):
         """
         🔄 修复版：按管理员设置的重置时间进行周期重置
-        只重置累计统计和当前状态，不删除历史记录
+        ⭐ 只重置累计统计，不删除历史活动记录
         """
         try:
             # ⭐ 使用周期日期，而不是自然日
@@ -664,8 +664,6 @@ class PostgreSQLDatabase:
                     raise ValueError(
                         f"target_date必须是date类型，得到: {type(target_date)}"
                     )
-
-                # 🆕 重要修改：使用传入的 target_date
                 reset_to_date = target_date
 
             # 读取旧状态，仅用于记录日志
@@ -673,7 +671,7 @@ class PostgreSQLDatabase:
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # ⭐ 不删除历史记录，只重置统计区
+                    # ⭐ 🆕 关键修复：只重置 users 表的统计字段，不删除 user_activities
                     await conn.execute(
                         """
                         UPDATE users SET
@@ -693,16 +691,8 @@ class PostgreSQLDatabase:
                         reset_to_date,  # ⭐ 使用正确的日期
                     )
 
-                    # 🆕 关键修复：在同一个事务中重置 user_activities 表中的数据
-                    await conn.execute(
-                        """
-                        DELETE FROM user_activities 
-                        WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3
-                        """,
-                        chat_id,
-                        user_id,
-                        reset_to_date,
-                    )
+                    # 🆕 关键修复：不再删除 user_activities 记录！
+                    # 月度统计需要这些历史数据
 
             # 清理缓存
             cache_keys = [
@@ -718,12 +708,12 @@ class PostgreSQLDatabase:
             logger.info(
                 f"♻ 周期重置完成: 用户 {user_id} (群 {chat_id})\n"
                 f"   📅 重置到日期: {reset_to_date}\n"
+                f"   📊 重置内容: 仅 users 表统计字段\n"
+                f"   💾 保留内容: user_activities 历史记录（用于月度统计）\n"
                 f"   📊 之前状态:\n"
                 f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
                 f"       - 累计时长: {user_before.get('total_accumulated_time', 0) if user_before else 0} 秒\n"
-                f"       - 罚款: {user_before.get('total_fines', 0) if user_before else 0}\n"
-                f"       - 超时次数: {user_before.get('overtime_count', 0) if user_before else 0}\n"
-                f"       - 当前活动: {user_before.get('current_activity', '无') if user_before else '无'}"
+                f"       - 罚款: {user_before.get('total_fines', 0) if user_before else 0}"
             )
 
             return True
