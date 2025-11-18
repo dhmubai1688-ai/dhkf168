@@ -24,19 +24,48 @@ def beijing_today():
 #    新增：按管理员重置时间计算周期日期
 # ====================================
 async def get_period_date(self, chat_id: int) -> date:
-    group = await self.get_group(chat_id)
-    reset_hour = group.get("reset_hour", 0)
-    reset_minute = group.get("reset_minute", 0)
-
+    """
+    🎯 修复版周期日期计算
+    - 正确处理任何时间设置
+    - 基于"昨天重置时间到今天重置时间"为一个周期
+    """
     now = beijing_now()
-    today_reset = now.replace(
-        hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-    )
 
-    if now >= today_reset:
+    try:
+        group = await self.get_group(chat_id)
+        if not group:
+            await self.init_group(chat_id)
+            group = await self.get_group(chat_id)
+
+        reset_hour = group.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        # 🆕 关键修复：计算昨天和今天的重置时间点
+        reset_time_today = now.replace(
+            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+        )
+        reset_time_yesterday = reset_time_today - timedelta(days=1)
+
+        # 🆕 新的逻辑：如果当前时间在昨天重置时间之后、今天重置时间之前，属于今天周期
+        # 如果当前时间在今天重置时间之后，属于明天周期
+        if reset_time_yesterday <= now < reset_time_today:
+            # 属于今天周期（从昨天重置时间开始）
+            period_date = now.date()
+        else:
+            # 属于明天周期（从今天重置时间开始）
+            period_date = (now + timedelta(days=1)).date()
+
+        logger.debug(
+            f"🔍 周期计算修复版: 当前={now.strftime('%m/%d %H:%M')}, "
+            f"重置={reset_hour:02d}:{reset_minute:02d}, "
+            f"周期={period_date}"
+        )
+
+        return period_date
+
+    except Exception as e:
+        logger.error(f"❌ 周期计算失败，使用今天作为默认: {e}")
         return now.date()
-    else:
-        return (now - timedelta(days=1)).date()
 
 
 class PostgreSQLDatabase:
