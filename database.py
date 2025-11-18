@@ -682,37 +682,18 @@ class PostgreSQLDatabase:
     async def get_user_activity_count(
         self, chat_id: int, user_id: int, activity: str
     ) -> int:
-        """获取用户今日活动次数（基于last_updated日期）"""
-        # 先获取用户数据来确定当前日期
-        user_data = await self.get_user(chat_id, user_id)
-        if not user_data:
-            return 0
-
-        current_date = user_data.get("last_updated")
-        if not current_date:
-            return 0
-
-        # 如果是字符串，转换为日期
-        if isinstance(current_date, str):
-            try:
-                current_date = datetime.strptime(current_date, "%Y-%m-%d").date()
-            except ValueError:
-                current_date = datetime.now().date()
-        elif isinstance(current_date, datetime):
-            current_date = current_date.date()
-
+        """获取用户今日活动次数"""
+        today = datetime.now().date()
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT activity_count FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3 AND activity_name = $4",
                 chat_id,
                 user_id,
-                current_date,
+                today,
                 activity,
             )
             count = row["activity_count"] if row else 0
-            logger.debug(
-                f"📊 获取活动计数: 用户{user_id} 活动{activity} 日期{current_date} 计数{count}"
-            )
+            logger.debug(f"📊 获取活动计数: 用户{user_id} 活动{activity} 计数{count}")
             return count
 
     async def get_user_activity_time(
@@ -733,31 +714,14 @@ class PostgreSQLDatabase:
     async def get_user_all_activities(
         self, chat_id: int, user_id: int
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据（基于last_updated日期）"""
-        # 先获取用户数据来确定当前日期
-        user_data = await self.get_user(chat_id, user_id)
-        if not user_data:
-            return {}
-
-        current_date = user_data.get("last_updated")
-        if not current_date:
-            return {}
-
-        # 如果是字符串，转换为日期
-        if isinstance(current_date, str):
-            try:
-                current_date = datetime.strptime(current_date, "%Y-%m-%d").date()
-            except ValueError:
-                current_date = datetime.now().date()
-        elif isinstance(current_date, datetime):
-            current_date = current_date.date()
-
+        """获取用户所有活动数据"""
+        today = datetime.now().date()
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
                 chat_id,
                 user_id,
-                current_date,
+                today,
             )
 
             activities = {}
@@ -1142,26 +1106,34 @@ class PostgreSQLDatabase:
     async def get_group_statistics(
         self, chat_id: int, target_date: Optional[date] = None
     ) -> List[Dict]:
-        """获取群组统计信息（基于last_updated日期）"""
-        # 如果未指定目标日期，使用当前日期
+        """获取群组统计信息，按指定日期查询 - 修复重置后查询问题"""
         if target_date is None:
             target_date = datetime.now().date()
 
         async with self.pool.acquire() as conn:
-            # 🆕 关键修改：使用 last_updated 字段来过滤用户
+            # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
             users = await conn.fetch(
                 """
-                SELECT 
-                    u.user_id, 
-                    u.nickname,
-                    u.total_accumulated_time,
-                    u.total_activity_count,
-                    u.total_fines,
-                    u.overtime_count,
-                    u.total_overtime_time,
-                    u.last_updated
+                SELECT DISTINCT u.user_id, u.nickname, 
+                    COALESCE(ua_total.total_accumulated_time, 0) as total_accumulated_time,
+                    COALESCE(ua_total.total_activity_count, 0) as total_activity_count,
+                    COALESCE(u.total_fines, 0) as total_fines,
+                    COALESCE(u.overtime_count, 0) as overtime_count,
+                    COALESCE(u.total_overtime_time, 0) as total_overtime_time
                 FROM users u
-                WHERE u.chat_id = $1 AND u.last_updated = $2
+                LEFT JOIN (
+                    SELECT user_id, 
+                        SUM(accumulated_time) as total_accumulated_time,
+                        SUM(activity_count) as total_activity_count
+                    FROM user_activities 
+                    WHERE chat_id = $1 AND activity_date = $2
+                    GROUP BY user_id
+                ) ua_total ON u.user_id = ua_total.user_id
+                WHERE u.chat_id = $1 
+                AND EXISTS (
+                    SELECT 1 FROM user_activities 
+                    WHERE chat_id = $1 AND user_id = u.user_id AND activity_date = $2
+                )
                 """,
                 chat_id,
                 target_date,
@@ -1177,7 +1149,7 @@ class PostgreSQLDatabase:
                     user_data["total_overtime_time"]
                 )
 
-                # 获取用户在目标日期的活动详情
+                # 获取用户在 target_date 的活动详情
                 activities = await conn.fetch(
                     """
                     SELECT activity_name, activity_count, accumulated_time
@@ -1239,10 +1211,8 @@ class PostgreSQLDatabase:
                 return []
 
     async def get_group_members(self, chat_id: int) -> List[Dict]:
-        """获取群组成员（基于last_updated日期）"""
-        # 使用当前日期
+        """获取群组成员"""
         today = datetime.now().date()
-
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT user_id, nickname, current_activity, activity_start_time, total_accumulated_time, total_activity_count, total_fines, overtime_count, total_overtime_time FROM users WHERE chat_id = $1 AND last_updated = $2",
@@ -1458,51 +1428,6 @@ class PostgreSQLDatabase:
                     user_data["avg_work_end_early"]
                 )
                 result.append(user_data)
-
-            return result
-
-    async def get_daily_ranking(
-        self, chat_id: int, target_date: date, activity: str = None, limit: int = 10
-    ) -> List[Dict]:
-        """获取指定日期的排行榜"""
-        async with self.pool.acquire() as conn:
-            if activity:
-                # 特定活动的排行榜
-                query = """
-                    SELECT ua.user_id, u.nickname, ua.accumulated_time as total_time
-                    FROM user_activities ua
-                    JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                    WHERE ua.chat_id = $1 AND ua.activity_name = $2 
-                    AND ua.activity_date = $3 AND u.last_updated = $3
-                    ORDER BY ua.accumulated_time DESC
-                    LIMIT $4
-                """
-                params = [chat_id, activity, target_date, limit]
-            else:
-                # 总时长排行榜
-                query = """
-                    SELECT u.user_id, u.nickname, u.total_accumulated_time as total_time
-                    FROM users u
-                    WHERE u.chat_id = $1 AND u.last_updated = $2
-                    ORDER BY u.total_accumulated_time DESC
-                    LIMIT $3
-                """
-                params = [chat_id, target_date, limit]
-
-            rows = await conn.fetch(query, *params)
-
-            result = []
-            for row in rows:
-                result.append(
-                    {
-                        "user_id": row["user_id"],
-                        "nickname": row["nickname"],
-                        "total_time": row["total_time"] or 0,
-                        "total_time_formatted": self.format_seconds_to_hms(
-                            row["total_time"] or 0
-                        ),
-                    }
-                )
 
             return result
 
