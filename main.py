@@ -638,102 +638,52 @@ async def calculate_work_fine(checkin_type: str, late_minutes: float) -> int:
 
 async def reset_daily_data_if_needed(chat_id: int, uid: int):
     """
-    🎯 精确版每日数据重置 - 基于管理员设定的重置时间点
-    逻辑：如果用户最后更新时间在上个重置周期之前，就重置数据
+    🎯 修复版每日数据重置
+    - 基于新的周期计算逻辑
     """
-    from datetime import date, datetime, timedelta
-
     try:
         now = get_beijing_time()
-
-        # 获取群组自定义重置时间
-        group_info = await db.get_group_cached(chat_id)
-        if not group_info:
-            # 如果群组不存在，先初始化
-            await db.init_group(chat_id)
-            group_info = await db.get_group_cached(chat_id)
-
-        reset_hour = group_info.get("reset_hour", Config.DAILY_RESET_HOUR)
-        reset_minute = group_info.get("reset_minute", Config.DAILY_RESET_MINUTE)
-
-        # 计算当前重置周期开始时间
-        reset_time_today = now.replace(
-            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-        )
-
-        if now < reset_time_today:
-            # 当前时间还没到今天的重置点 → 当前周期起点是昨天的重置时间
-            current_period_start = reset_time_today - timedelta(days=1)
-        else:
-            # 已经过了今天的重置点 → 当前周期起点为今天的重置时间
-            current_period_start = reset_time_today
-
+        
+        # 获取正确的周期日期
+        current_period_date = await db.get_period_date(chat_id)
+        
         # 获取用户数据
         user_data = await db.get_user_cached(chat_id, uid)
         if not user_data:
-            # 用户不存在，初始化用户
             await db.init_user(chat_id, uid, "用户")
             return
-
-        last_updated_str = user_data.get("last_updated")
-        if not last_updated_str:
-            # 如果没有最后更新时间，重置数据
-            logger.info(f"🔄 初始化用户数据: {chat_id}-{uid} (无最后更新时间)")
-            await db.reset_user_daily_data(chat_id, uid, now.date())
-            await db.update_user_last_updated(chat_id, uid, now.date())
-            return
-
-        # 解析最后更新时间
-        last_updated = None
-        if isinstance(last_updated_str, str):
+            
+        last_updated = user_data.get("last_updated")
+        
+        # 处理 last_updated 格式
+        if isinstance(last_updated, str):
             try:
-                # 尝试ISO格式解析
-                last_updated = datetime.fromisoformat(
-                    str(last_updated_str).replace("Z", "+00:00")
-                )
+                last_updated = datetime.strptime(last_updated, "%Y-%m-%d").date()
             except ValueError:
-                try:
-                    # 尝试日期格式解析
-                    last_updated = datetime.strptime(str(last_updated_str), "%Y-%m-%d")
-                except ValueError:
-                    # 其他格式，直接使用今天日期
-                    last_updated = now
-        elif isinstance(last_updated_str, datetime):
-            last_updated = last_updated_str
-        elif isinstance(last_updated_str, date):
-            last_updated = datetime.combine(last_updated_str, datetime.min.time())
-        else:
-            # 未知类型，使用今天日期
-            last_updated = now
-
-        # 🎯 关键逻辑：比较最后更新时间是否在当前重置周期之前
-        if last_updated.date() < current_period_start.date():
+                last_updated = now.date()
+        elif isinstance(last_updated, datetime):
+            last_updated = last_updated.date()
+        
+        # 🆕 简化检查：如果最后更新日期不等于当前周期日期，就重置
+        if last_updated != current_period_date:
             logger.info(
-                f"🔄 重置用户数据: {chat_id}-{uid}\n"
-                f"   最后活动时间: {last_updated.date()}\n"
-                f"   当前周期开始: {current_period_start.date()}\n"
-                f"   重置时间设置: {reset_hour:02d}:{reset_minute:02d}\n"
-                f"   当前北京时问: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"🔄 执行数据重置: {chat_id}-{uid}\n"
+                f"   最后活动: {last_updated}\n"
+                f"   当前周期: {current_period_date}"
             )
-
+            
             # 执行重置
-            await db.reset_user_daily_data(chat_id, uid, current_period_start.date())
-            # 更新最后更新时间到当前周期
-            await db.update_user_last_updated(chat_id, uid, now.date())
-
-        else:
-            logger.debug(
-                f"✅ 无需重置: {chat_id}-{uid}\n"
-                f"   最后活动: {last_updated.date()}\n"
-                f"   周期开始: {current_period_start.date()}"
-            )
-
+            success = await db.reset_user_daily_data(chat_id, uid, current_period_date)
+            
+            if success:
+                logger.info(f"✅ 数据重置成功: {chat_id}-{uid}")
+            else:
+                logger.error(f"❌ 数据重置失败: {chat_id}-{uid}")
+                
     except Exception as e:
         logger.error(f"❌ 重置检查失败 {chat_id}-{uid}: {e}")
-        # 出错时安全初始化用户
         try:
             await db.init_user(chat_id, uid, "用户")
-            await db.update_user_last_updated(chat_id, uid, datetime.now().date())
         except Exception as init_error:
             logger.error(f"❌ 用户初始化也失败: {init_error}")
 
@@ -4509,12 +4459,12 @@ async def auto_daily_export_task():
 
 
 async def daily_reset_task():
-    """每日自动重置任务（修复版）- 只重置统计，保留历史记录"""
+    """每日自动重置任务（修复版）- 基于新周期逻辑"""
     last_reset_key = {}  # {chat_id: "YYYY-MM-DD"}
 
     while True:
         now = get_beijing_time()
-        logger.info(f"🔄 重置任务检查，当前时间: {now}")
+        logger.debug(f"🔄 重置任务检查，当前时间: {now}")
 
         try:
             all_groups = await asyncio.wait_for(db.get_all_groups(), timeout=15)
@@ -4525,56 +4475,33 @@ async def daily_reset_task():
 
         for chat_id in all_groups:
             try:
-                group_data = await asyncio.wait_for(
-                    db.get_group_cached(chat_id), timeout=10
-                )
-                if not group_data:
-                    continue
-
-                reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
-                reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
-
-                # 🆕 关键修复：使用与 get_period_date 相同的逻辑计算重置时间
-                reset_time_today = now.replace(
-                    hour=reset_hour, minute=reset_minute, second=0, microsecond=0
-                )
-
-                # 计算当前应该属于哪个周期
-                if now < reset_time_today:
-                    current_period_start = reset_time_today - timedelta(days=1)
-                else:
-                    current_period_start = reset_time_today
-
-                # 🆕 检查是否到了新的周期
-                current_period_date = current_period_start.date()
+                # 🆕 直接获取当前周期日期
+                current_period_date = await db.get_period_date(chat_id)
                 last_reset_date = last_reset_key.get(chat_id)
 
                 if last_reset_date != current_period_date:
                     # 新的周期开始了，执行重置
                     logger.info(f"⏰ 检测到新周期，正在重置群组 {chat_id} 的数据...")
                     logger.info(f"   当前时间: {now}")
-                    logger.info(f"   重置时间: {reset_hour:02d}:{reset_minute:02d}")
-                    logger.info(f"   周期开始: {current_period_date}")
+                    logger.info(f"   新周期开始: {current_period_date}")
 
-                    # ====== 获取所有群成员 ======
+                    # 获取所有群成员
                     group_members = await db.get_group_members(
                         chat_id, only_today=False
                     )
 
-                    # ====== 执行用户级重置 ======
+                    # 执行用户级重置
                     reset_count = 0
                     for user in group_members:
                         uid = user["user_id"]
                         user_lock = get_user_lock(chat_id, uid)
                         async with user_lock:
-                            # 🆕 使用当前周期日期进行重置
                             success = await db.reset_user_daily_data(
                                 chat_id, uid, current_period_date
                             )
                             if success:
                                 reset_count += 1
 
-                    # ====== 🆕 关键修改：不再清理 user_activities，保留历史记录 ======
                     # 只清理当日的上下班记录
                     await db.clear_today_work_records(chat_id)
 
@@ -4583,10 +4510,10 @@ async def daily_reset_task():
 
                     logger.info(
                         f"✅ 群组 {chat_id} 数据重置完成，重置了 {reset_count} 个用户\n"
-                        f"   💾 保留内容: user_activities 历史记录（用于月度统计）"
+                        f"   新周期: {current_period_date}"
                     )
 
-                    # ====== 启动延迟导出任务 ======
+                    # 启动延迟导出任务
                     asyncio.create_task(delayed_export(chat_id, 30))
                     logger.info(
                         f"📤 群组 {chat_id} 已安排延迟导出任务（30 分钟后执行）"
@@ -4597,7 +4524,7 @@ async def daily_reset_task():
             except Exception as e:
                 logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
 
-        await asyncio.sleep(60)  # 每分钟检查一次
+        await asyncio.sleep(60)
 
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
