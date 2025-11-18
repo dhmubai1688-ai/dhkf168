@@ -2431,6 +2431,35 @@ async def cmd_reset_work(message: types.Message):
         await message.answer(f"❌ 重置失败: {e}")
 
 
+@dp.message(Command("cleanup_monthly"))
+@admin_required
+async def cmd_cleanup_monthly(message: types.Message):
+    """清理指定年月的月度数据"""
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer(
+            "❌ 用法: /cleanup_monthly <年> <月>\n例如: /cleanup_monthly 2024 1"
+        )
+        return
+
+    try:
+        year = int(args[1])
+        month = int(args[2])
+
+        if month < 1 or month > 12:
+            await message.answer("❌ 月份必须在1-12之间")
+            return
+
+        success = await db.cleanup_monthly_data(year, month)
+        if success:
+            await message.answer(f"✅ 已清理 {year}年{month}月 的月度数据")
+        else:
+            await message.answer(f"❌ 清理月度数据失败")
+
+    except ValueError:
+        await message.answer("❌ 请输入有效的年份和月份")
+
+
 @dp.message(Command("testpush"))
 @admin_required
 @rate_limit(rate=3, per=60)
@@ -3023,6 +3052,45 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                     time_diff_minutes,
                     fine_amount,
                 )
+
+                # 🆕 步骤8：在下班打卡时更新月度工作时长统计
+                if checkin_type == "work_end":
+                    try:
+                        # 获取今天的上班记录来计算工作时长
+                        today_records = await db.get_today_work_records(chat_id, uid)
+                        if "work_start" in today_records:
+                            start_record = today_records["work_start"]
+                            start_time_str = start_record["checkin_time"]
+
+                            # 计算工作时长（从上班到下班的时间差，单位：秒
+                            start_dt = datetime.strptime(
+                                f"{today} {start_time_str}", "%Y-%m-%d %H:%M"
+                            )
+                            end_dt = datetime.strptime(
+                                f"{today} {current_time}", "%Y-%m-%d %H:%M"
+                            )
+                            work_seconds = int((end_dt - start_dt).total_seconds())
+
+                            # 只记录合理的工作时长（至少1分钟，最多24小时）
+                            if 60 <= work_seconds <= 86400:
+                                # 更新月度工作时长统计
+                                monthly_date = now.replace(day=1).date()  # 月度统计日期
+
+                                # 使用新的数据库方法更新工作时长
+                                await db.update_monthly_work_hours(
+                                    chat_id, uid, monthly_date, work_seconds
+                                )
+
+                                logger.info(
+                                    f"[{trace_id}] 📊 更新工作时长: {work_seconds}秒 ({work_seconds//3600}小时{work_seconds%3600//60}分钟)"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[{trace_id}] ⚠️ 异常工作时长: {work_seconds}秒，跳过记录"
+                                )
+                    except Exception as e:
+                        logger.error(f"[{trace_id}] ❌ 更新工作时长失败: {e}")
+
                 break
             except Exception as e:
                 logger.error(f"[{trace_id}] ❌ 数据写入失败，第{attempt+1}次尝试: {e}")
