@@ -4509,11 +4509,8 @@ async def auto_daily_export_task():
 
 
 async def daily_reset_task():
-    """
-    每日自动重置任务（重置 + 延迟导出昨日数据）- 完整正确版本
-    """
-
-    last_reset_key = {}  # {chat_id: "YYYY-MM-DD HH:MM"}
+    """每日自动重置任务（修复版）- 使用统一的周期日期计算"""
+    last_reset_key = {}  # {chat_id: "YYYY-MM-DD"}
 
     while True:
         now = get_beijing_time()
@@ -4537,17 +4534,27 @@ async def daily_reset_task():
                 reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
                 reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-                # ====== 判断是否到了重置时间 ======
-                if now.hour == reset_hour and now.minute == reset_minute:
+                # 🆕 关键修复：使用与 get_period_date 相同的逻辑计算重置时间
+                reset_time_today = now.replace(
+                    hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+                )
 
-                    # 防止重复执行
-                    reset_key = now.strftime("%Y-%m-%d %H:%M")
-                    if last_reset_key.get(chat_id) == reset_key:
-                        logger.info(f"⏳ 群组 {chat_id} 已执行过重置，跳过。")
-                        continue
-                    last_reset_key[chat_id] = reset_key
+                # 计算当前应该属于哪个周期
+                if now < reset_time_today:
+                    current_period_start = reset_time_today - timedelta(days=1)
+                else:
+                    current_period_start = reset_time_today
 
-                    logger.info(f"⏰ 到达重置时间，正在重置群组 {chat_id} 的数据...")
+                # 🆕 检查是否到了新的周期
+                current_period_date = current_period_start.date()
+                last_reset_date = last_reset_key.get(chat_id)
+
+                if last_reset_date != current_period_date:
+                    # 新的周期开始了，执行重置
+                    logger.info(f"⏰ 检测到新周期，正在重置群组 {chat_id} 的数据...")
+                    logger.info(f"   当前时间: {now}")
+                    logger.info(f"   重置时间: {reset_hour:02d}:{reset_minute:02d}")
+                    logger.info(f"   周期开始: {current_period_date}")
 
                     # ====== 获取所有群成员 ======
                     group_members = await db.get_group_members(
@@ -4555,36 +4562,40 @@ async def daily_reset_task():
                     )
 
                     # ====== 执行用户级重置 ======
+                    reset_count = 0
                     for user in group_members:
                         uid = user["user_id"]
                         user_lock = get_user_lock(chat_id, uid)
                         async with user_lock:
-                            period_date = await db.get_period_date(chat_id)
-                            await db.reset_user_daily_data(chat_id, uid, period_date)
-                            await db.update_user_last_updated(chat_id, uid, period_date)
-                            # 清除正在进行的活动（确保当天无挂起）
-                            await db.clear_user_cache(chat_id, uid)
+                            # 🆕 使用当前周期日期进行重置
+                            success = await db.reset_user_daily_data(
+                                chat_id, uid, current_period_date
+                            )
+                            if success:
+                                reset_count += 1
 
                     # ====== 清理当日上下班打卡 ======
                     await db.clear_today_work_records(chat_id)
 
-                    logger.info(f"✅ 群组 {chat_id} 数据重置完成")
+                    # 更新最后重置日期
+                    last_reset_key[chat_id] = current_period_date
+
+                    logger.info(
+                        f"✅ 群组 {chat_id} 数据重置完成，重置了 {reset_count} 个用户"
+                    )
 
                     # ====== 启动延迟导出任务 ======
-                    if "delayed_export" in globals():  # 防止不存在时报错
-                        asyncio.create_task(delayed_export(chat_id, 30))
-                        logger.info(
-                            f"📤 群组 {chat_id} 已安排延迟导出任务（30 分钟后执行）"
-                        )
-                    else:
-                        logger.warning("⚠ delayed_export 未定义，跳过延迟导出。")
+                    asyncio.create_task(delayed_export(chat_id, 30))
+                    logger.info(
+                        f"📤 群组 {chat_id} 已安排延迟导出任务（30 分钟后执行）"
+                    )
 
             except asyncio.TimeoutError:
                 logger.warning(f"⏰ 群组 {chat_id} 重置超时，跳过。")
             except Exception as e:
                 logger.error(f"❌ 群组 {chat_id} 重置失败: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(60)  # 每分钟检查一次
 
 
 async def delayed_export(chat_id: int, delay_minutes: int = 30):
