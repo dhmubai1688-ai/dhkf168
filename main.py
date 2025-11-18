@@ -3475,6 +3475,8 @@ async def handle_other_text_messages(message: types.Message):
 
 
 # ==================== 用户功能优化 ====================
+
+
 async def show_history(message: types.Message):
     """显示用户历史记录 - 优化版本"""
     chat_id = message.chat.id
@@ -3501,8 +3503,15 @@ async def show_history(message: types.Message):
                 text += f"• <code>{act}</code>：<code>{time_str}</code>，次数：<code>{count}</code>/<code>{max_times}</code> {status}\n"
                 has_records = True
 
-        total_time_all = user.get("total_accumulated_time", 0)
-        total_count_all = user.get("total_activity_count", 0)
+        # 🆕 关键修复：直接从 user_activities 计算总统计
+        total_time_all = sum(
+            act_info.get("time", 0) for act_info in user_activities.values()
+        )
+        total_count_all = sum(
+            act_info.get("count", 0) for act_info in user_activities.values()
+        )
+
+        # 从用户表获取其他统计（这些在重置时会被清零）
         total_fine = user.get("total_fines", 0)
         overtime_count = user.get("overtime_count", 0)
         total_overtime = user.get("total_overtime_time", 0)
@@ -3529,11 +3538,11 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（修复版）——直接从 user_activities 聚合当天数据，避免依赖 last_updated"""
+    """显示排行榜（修复版）——直接从 user_activities 聚合当天数据"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    # 确保群组初始化（如果你 init_group 有副作用）
+    # 确保群组初始化
     await db.init_group(chat_id)
 
     # 读取活动列表（带缓存）
@@ -3551,7 +3560,7 @@ async def show_rank(message: types.Message):
     rank_text = "🏆 今日活动排行榜\n\n"
     today = datetime.now().date()
 
-    # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
+    # 使用连接一次性查询每个活动的 TopN
     top_n = 3
     async with db.pool.acquire() as conn:
         any_result = False
@@ -3559,7 +3568,7 @@ async def show_rank(message: types.Message):
             rows = await conn.fetch(
                 """
                 SELECT
-                    u.user_id,
+                    ua.user_id,
                     u.nickname,
                     ua.accumulated_time as total_time
                 FROM user_activities ua
@@ -3575,7 +3584,6 @@ async def show_rank(message: types.Message):
             )
 
             if not rows:
-                # 跳过没有数据的活动（也可以显示“暂无记录”）
                 continue
 
             any_result = True
@@ -3584,17 +3592,7 @@ async def show_rank(message: types.Message):
                 user_id = row["user_id"]
                 name = row["nickname"] or str(user_id)
                 time_sec = row["total_time"] or 0
-                # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
-                # 这里尽量使用项目里已有的工具：
-                try:
-                    time_str = MessageFormatter.format_time(int(time_sec))
-                except Exception:
-                    # 兜底格式化为秒->时分秒
-                    time_str = (
-                        db.format_seconds_to_hms(int(time_sec))
-                        if hasattr(db, "format_seconds_to_hms")
-                        else f"{int(time_sec)}s"
-                    )
+                time_str = MessageFormatter.format_time(int(time_sec))
 
                 rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - <code>{time_str}</code>\n"
             rank_text += "\n"
