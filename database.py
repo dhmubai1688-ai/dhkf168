@@ -633,7 +633,6 @@ class PostgreSQLDatabase:
             cache_keys = [
                 f"user:{chat_id}:{user_id}",
                 f"group:{chat_id}",
-                "activity_limits",
             ]
             for key in cache_keys:
                 self._cache.pop(key, None)
@@ -717,16 +716,18 @@ class PostgreSQLDatabase:
             return row["accumulated_time"] if row else 0
 
     async def get_user_all_activities(
-        self, chat_id: int, user_id: int
+        self, chat_id: int, user_id: int, target_date: date = None
     ) -> Dict[str, Dict]:
-        """获取用户所有活动数据"""
-        today = self.get_beijing_date()
+        """获取用户所有活动数据 - 支持指定日期"""
+        if target_date is None:
+            target_date = self.get_beijing_date()
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT activity_name, activity_count, accumulated_time FROM user_activities WHERE chat_id = $1 AND user_id = $2 AND activity_date = $3",
                 chat_id,
                 user_id,
-                today,
+                target_date,
             )
 
             activities = {}
@@ -1116,29 +1117,28 @@ class PostgreSQLDatabase:
             target_date = self.get_beijing_date()
 
         async with self.pool.acquire() as conn:
-            # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
+            # 🆕 优化版本：使用 JOIN 替代 EXISTS，性能更好
             users = await conn.fetch(
                 """
-                SELECT DISTINCT u.user_id, u.nickname, 
+                SELECT 
+                    u.user_id, 
+                    u.nickname, 
                     COALESCE(ua_total.total_accumulated_time, 0) as total_accumulated_time,
                     COALESCE(ua_total.total_activity_count, 0) as total_activity_count,
                     COALESCE(u.total_fines, 0) as total_fines,
                     COALESCE(u.overtime_count, 0) as overtime_count,
                     COALESCE(u.total_overtime_time, 0) as total_overtime_time
                 FROM users u
-                LEFT JOIN (
-                    SELECT user_id, 
+                INNER JOIN (
+                    SELECT 
+                        user_id,
                         SUM(accumulated_time) as total_accumulated_time,
                         SUM(activity_count) as total_activity_count
                     FROM user_activities 
                     WHERE chat_id = $1 AND activity_date = $2
                     GROUP BY user_id
                 ) ua_total ON u.user_id = ua_total.user_id
-                WHERE u.chat_id = $1 
-                AND EXISTS (
-                    SELECT 1 FROM user_activities 
-                    WHERE chat_id = $1 AND user_id = u.user_id AND activity_date = $2
-                )
+                WHERE u.chat_id = $1
                 """,
                 chat_id,
                 target_date,
