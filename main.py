@@ -4509,7 +4509,7 @@ async def auto_daily_export_task():
 
 
 async def daily_reset_task():
-    """每日自动重置任务（修复版）- 使用统一的周期日期计算"""
+    """每日自动重置任务（修复版）- 只重置统计，保留历史记录"""
     last_reset_key = {}  # {chat_id: "YYYY-MM-DD"}
 
     while True:
@@ -4574,14 +4574,16 @@ async def daily_reset_task():
                             if success:
                                 reset_count += 1
 
-                    # ====== 清理当日上下班打卡 ======
+                    # ====== 🆕 关键修改：不再清理 user_activities，保留历史记录 ======
+                    # 只清理当日的上下班记录
                     await db.clear_today_work_records(chat_id)
 
                     # 更新最后重置日期
                     last_reset_key[chat_id] = current_period_date
 
                     logger.info(
-                        f"✅ 群组 {chat_id} 数据重置完成，重置了 {reset_count} 个用户"
+                        f"✅ 群组 {chat_id} 数据重置完成，重置了 {reset_count} 个用户\n"
+                        f"   💾 保留内容: user_activities 历史记录（用于月度统计）"
                     )
 
                     # ====== 启动延迟导出任务 ======
