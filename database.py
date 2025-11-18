@@ -25,9 +25,9 @@ def beijing_today():
 # ====================================
 async def get_period_date(self, chat_id: int) -> date:
     """
-    🎯 修复版周期日期计算
-    - 正确处理任何时间设置
-    - 基于"昨天重置时间到今天重置时间"为一个周期
+    🎯 修复版周期日期计算 - 最小化修改
+    - 保持原有接口，只修改内部逻辑
+    - 兼容现有所有调用代码
     """
     now = beijing_now()
 
@@ -40,23 +40,30 @@ async def get_period_date(self, chat_id: int) -> date:
         reset_hour = group.get("reset_hour", Config.DAILY_RESET_HOUR)
         reset_minute = group.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
-        # 🆕 关键修复：计算昨天和今天的重置时间点
         reset_time_today = now.replace(
             hour=reset_hour, minute=reset_minute, second=0, microsecond=0
         )
-        reset_time_yesterday = reset_time_today - timedelta(days=1)
 
-        # 🆕 新的逻辑：如果当前时间在昨天重置时间之后、今天重置时间之前，属于今天周期
-        # 如果当前时间在今天重置时间之后，属于明天周期
-        if reset_time_yesterday <= now < reset_time_today:
-            # 属于今天周期（从昨天重置时间开始）
-            period_date = now.date()
+        # 🆕 关键修复：重新定义逻辑，但保持返回值语义
+        if now < reset_time_today:
+            # 在重置时间之前 → 周期 = 昨天（与原逻辑一致）
+            period_date = (reset_time_today - timedelta(days=1)).date()
         else:
-            # 属于明天周期（从今天重置时间开始）
-            period_date = (now + timedelta(days=1)).date()
+            # 在重置时间之后 → 周期 = 今天（与原逻辑一致）
+            period_date = reset_time_today.date()
+
+        # 🆕 但！如果重置时间设置过晚（比如23:20），我们做特殊处理
+        if reset_hour >= 20:  # 如果重置时间在晚上8点之后
+            current_hour = now.hour
+            # 如果是白天时间（6:00-20:00），强制使用今天作为周期
+            if 6 <= current_hour < 20:
+                period_date = now.date()
+                logger.debug(
+                    f"🔄 重置时间过晚修正: {reset_hour:02d}:{reset_minute:02d} → 强制今天周期"
+                )
 
         logger.debug(
-            f"🔍 周期计算修复版: 当前={now.strftime('%m/%d %H:%M')}, "
+            f"🔍 周期计算: 时间={now.strftime('%H:%M')}, "
             f"重置={reset_hour:02d}:{reset_minute:02d}, "
             f"周期={period_date}"
         )
