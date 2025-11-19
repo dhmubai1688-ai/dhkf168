@@ -212,24 +212,6 @@ class PostgreSQLDatabase:
                     UNIQUE(chat_id, user_id, statistic_date, activity_name)
                 )
                 """,
-                """
-                CREATE TABLE IF NOT EXISTS activity_participant_limits (
-                    activity_name TEXT PRIMARY KEY,
-                    max_participants INTEGER DEFAULT 0,  -- 0表示无限制
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS activity_participant_counts (
-                    chat_id BIGINT,
-                    activity_name TEXT,
-                    participant_count INTEGER DEFAULT 0,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (chat_id, activity_name)
-                )
-                """,
             ]
 
             for table_sql in tables:
@@ -571,61 +553,26 @@ class PostgreSQLDatabase:
         start_time: str,
         nickname: str = None,
     ):
-        """更新用户活动状态 - 增加名额占用"""
+        """更新用户活动状态"""
         async with self.pool.acquire() as conn:
-            try:
-                # 先检查活动人数限制
-                can_start, limit_reason = await self.can_start_activity(
-                    chat_id, activity
+            if nickname:
+                await conn.execute(
+                    "UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $4 AND user_id = $5",
+                    activity,
+                    start_time,
+                    nickname,
+                    chat_id,
+                    user_id,
                 )
-                if not can_start:
-                    raise Exception(limit_reason)  # 抛出异常阻止活动开始
-
-                # 更新用户活动状态
-                if nickname:
-                    await conn.execute(
-                        "UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $4 AND user_id = $5",
-                        activity,
-                        start_time,
-                        nickname,
-                        chat_id,
-                        user_id,
-                    )
-                else:
-                    await conn.execute(
-                        "UPDATE users SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $3 AND user_id = $4",
-                        activity,
-                        start_time,
-                        chat_id,
-                        user_id,
-                    )
-
-                # 🆕 占用活动名额（在事务成功后）
-                await self.update_activity_participant_count(
-                    chat_id, activity, increment=True
+            else:
+                await conn.execute(
+                    "UPDATE users SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $3 AND user_id = $4",
+                    activity,
+                    start_time,
+                    chat_id,
+                    user_id,
                 )
-
-                self._cache.pop(f"user:{chat_id}:{user_id}", None)
-
-                logger.info(f"✅ 用户 {user_id} 开始活动 {activity}，名额占用成功")
-
-            except Exception as e:
-                # 如果出现异常，确保不会占用名额
-                logger.error(f"❌ 用户 {user_id} 开始活动 {activity} 失败: {e}")
-
-                # 检查是否是人数限制导致的失败
-                if "参与人数已达上限" in str(e):
-                    # 这是预期的人数限制错误，直接抛出
-                    raise e
-                else:
-                    # 其他错误，尝试回滚名额占用（如果已经占用）
-                    try:
-                        await self.update_activity_participant_count(
-                            chat_id, activity, increment=False
-                        )
-                    except:
-                        pass  # 忽略回滚错误
-                    raise e  # 重新抛出原始异常
+            self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
     async def complete_user_activity(
         self,
@@ -636,7 +583,7 @@ class PostgreSQLDatabase:
         fine_amount: int = 0,
         is_overtime: bool = False,
     ):
-        """完成用户活动 - 同时更新月度统计并释放名额"""
+        """完成用户活动 - 同时更新月度统计"""
         today = self.get_beijing_date()
         statistic_date = today.replace(day=1)  # 月度统计使用月初日期
 
@@ -727,17 +674,9 @@ class PostgreSQLDatabase:
                 query = f"UPDATE users SET {placeholders} WHERE chat_id = ${len(params)-1} AND user_id = ${len(params)}"
                 await conn.execute(query, *params)
 
-                # 🆕 关键修改：在事务内释放活动名额
-                await self.update_activity_participant_count(
-                    chat_id, activity, increment=False
-                )
-
-            # 事务提交后才清理缓存
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
-        logger.info(
-            f"🔍 [数据库操作完成] 用户{user_id} 活动{activity} 完成更新，名额已释放"
-        )
+        logger.info(f"🔍 [数据库操作完成] 用户{user_id} 活动{activity} 完成更新")
 
     async def reset_user_daily_data(
         self, chat_id: int, user_id: int, target_date: date | None = None
@@ -1087,36 +1026,22 @@ class PostgreSQLDatabase:
 
     # ========== 活动配置操作 ==========
     async def get_activity_limits(self) -> Dict:
-        """获取所有活动限制（包含人数限制）"""
+        """获取所有活动限制"""
         cache_key = "activity_limits"
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
         async with self.pool.acquire() as conn:
-            # 获取活动基本配置
-            activity_rows = await conn.fetch("SELECT * FROM activity_configs")
-            # 获取人数限制配置
-            participant_rows = await conn.fetch(
-                "SELECT * FROM activity_participant_limits"
-            )
+            rows = await conn.fetch("SELECT * FROM activity_configs")
 
-            # 创建人数限制映射
-            participant_limits = {
-                row["activity_name"]: row["max_participants"]
-                for row in participant_rows
-            }
-
-            limits = {}
-            for row in activity_rows:
-                activity_name = row["activity_name"]
-                limits[activity_name] = {
+            limits = {
+                row["activity_name"]: {
                     "max_times": row["max_times"],
                     "time_limit": row["time_limit"],
-                    "max_participants": participant_limits.get(
-                        activity_name, 0
-                    ),  # 🆕 添加人数限制
                 }
+                for row in rows
+            }
             self._set_cached(cache_key, limits, 300)
             return limits
 
@@ -1150,11 +1075,7 @@ class PostgreSQLDatabase:
             return row is not None
 
     async def update_activity_config(
-        self,
-        activity: str,
-        max_times: int,
-        time_limit: int,
-        max_participants: int = 0,  # 🆕 添加参数
+        self, activity: str, max_times: int, time_limit: int
     ):
         """更新活动配置 - 修复新增活动无法打卡问题"""
         async with self.pool.acquire() as conn:
@@ -1173,20 +1094,6 @@ class PostgreSQLDatabase:
                     activity,
                     max_times,
                     time_limit,
-                )
-
-                # 🆕 新增：更新人数限制
-                await conn.execute(
-                    """
-                    INSERT INTO activity_participant_limits (activity_name, max_participants)
-                    VALUES ($1, $2)
-                    ON CONFLICT (activity_name) 
-                    DO UPDATE SET 
-                        max_participants = EXCLUDED.max_participants,
-                        updated_at = CURRENT_TIMESTAMP
-                    """,
-                    activity,
-                    max_participants,
                 )
 
                 # ✅ 初始化默认罚款配置，避免新增活动无法打卡
@@ -1209,9 +1116,7 @@ class PostgreSQLDatabase:
 
             # 清理缓存
             self._cache.pop("activity_limits", None)
-            logger.info(
-                f"✅ 活动配置更新完成: {activity}，次数上限: {max_times}，时间限制: {time_limit}，人数限制: {max_participants}"
-            )
+            logger.info(f"✅ 活动配置更新完成: {activity}，并初始化罚款配置")
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -1223,118 +1128,8 @@ class PostgreSQLDatabase:
                 await conn.execute(
                     "DELETE FROM fine_configs WHERE activity_name = $1", activity
                 )
-                # 🆕 新增：删除人数限制配置
-                await conn.execute(
-                    "DELETE FROM activity_participant_limits WHERE activity_name = $1",
-                    activity,
-                )
         self._cache.pop("activity_limits", None)
-        logger.info(f"🗑 已删除活动配置、罚款配置及人数限制: {activity}")
-
-    async def update_activity_participant_count(
-        self, chat_id: int, activity: str, increment: bool = True
-    ):
-        """更新活动参与人数计数 - 带持久化存储"""
-        cache_key = f"activity_participants:{activity}:{chat_id}"
-
-        try:
-            async with self.pool.acquire() as conn:
-                # 🆕 使用数据库表存储参与人数，避免服务重启后丢失
-                if increment:
-                    # 增加计数
-                    await conn.execute(
-                        """
-                        INSERT INTO activity_participant_counts (chat_id, activity_name, participant_count, last_updated)
-                        VALUES ($1, $2, 1, CURRENT_TIMESTAMP)
-                        ON CONFLICT (chat_id, activity_name) 
-                        DO UPDATE SET 
-                            participant_count = activity_participant_counts.participant_count + 1,
-                            last_updated = CURRENT_TIMESTAMP
-                    """,
-                        chat_id,
-                        activity,
-                    )
-                else:
-                    # 减少计数（确保不小于0）
-                    await conn.execute(
-                        """
-                        INSERT INTO activity_participant_counts (chat_id, activity_name, participant_count, last_updated)
-                        VALUES ($1, $2, 0, CURRENT_TIMESTAMP)
-                        ON CONFLICT (chat_id, activity_name) 
-                        DO UPDATE SET 
-                            participant_count = GREATEST(activity_participant_counts.participant_count - 1, 0),
-                            last_updated = CURRENT_TIMESTAMP
-                    """,
-                        chat_id,
-                        activity,
-                    )
-
-                # 获取更新后的计数
-                current_count = await conn.fetchval(
-                    "SELECT participant_count FROM activity_participant_counts WHERE chat_id = $1 AND activity_name = $2",
-                    chat_id,
-                    activity,
-                )
-
-                # 更新缓存
-                self._set_cached(cache_key, current_count or 0, 30)
-
-                logger.debug(f"🔄 活动参与人数更新: {activity} -> {current_count or 0}")
-
-        except Exception as e:
-            logger.error(f"❌ 更新活动参与人数失败 {chat_id}-{activity}: {e}")
-            # 失败时清理缓存，强制下次重新查询
-            self._cache.pop(cache_key, None)
-
-    # ========== 活动参与人数限制操作 ==========
-    async def get_current_participants_count(self, chat_id: int, activity: str) -> int:
-        """获取当前正在进行指定活动的用户数量 - 使用持久化存储"""
-        cache_key = f"activity_participants:{activity}:{chat_id}"
-        cached = self._get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-        try:
-            async with self.pool.acquire() as conn:
-                # 🆕 从持久化表获取计数
-                count = await conn.fetchval(
-                    "SELECT participant_count FROM activity_participant_counts WHERE chat_id = $1 AND activity_name = $2",
-                    chat_id,
-                    activity,
-                )
-
-                result = count or 0
-                self._set_cached(cache_key, result, 30)  # 30秒缓存
-                return result
-
-        except Exception as e:
-            logger.error(f"❌ 获取活动参与人数失败 {chat_id}-{activity}: {e}")
-            # 出错时返回0，避免阻塞正常流程
-            return 0
-
-    async def can_start_activity(self, chat_id: int, activity: str) -> tuple[bool, str]:
-        """检查是否可以开始活动（考虑人数限制）"""
-        # 获取活动配置（包含人数限制）
-        activity_limits = await self.get_activity_limits()
-        activity_info = activity_limits.get(activity, {})
-
-        # 获取人数限制
-        max_participants = activity_info.get("max_participants", 0)
-
-        # 如果为0表示无限制
-        if max_participants == 0:
-            return True, ""
-
-        # 获取当前参与人数
-        current_count = await self.get_current_participants_count(chat_id, activity)
-
-        if current_count >= max_participants:
-            return (
-                False,
-                f"❌ 活动 '{activity}' 参与人数已达上限 ({current_count}/{max_participants})，请等待其他用户回座后再尝试",
-            )
-
-        return True, ""
+        logger.info(f"🗑 已删除活动配置及罚款: {activity}")
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
