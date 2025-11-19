@@ -3932,11 +3932,12 @@ async def show_rank(message: types.Message):
 
 # ==================== 回座功能优化 ====================
 
+
 async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     """线程安全的回座逻辑（防重入 + 超时 + 日志优化）"""
     start_time = time.time()
     key = f"{chat_id}:{uid}"
-    
+
     # 🆕 在函数开始时获取活动名称
     current_activity = None
 
@@ -4136,12 +4137,12 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     finally:
         # ✅ 释放防重入锁 - 确保这里没有遗漏
         active_back_processing.pop(key, None)
-        
+
         # 🆕 新增：清理活动参与人数缓存（使用保存的 current_activity）
         if current_activity:
             db._cache.pop(f"activity_participants:{current_activity}:{chat_id}", None)
             logger.debug(f"🧹 清理活动人数缓存: {current_activity}")
-    
+
         duration = round(time.time() - start_time, 2)
         logger.info(f"✅ 回座结束 chat_id={chat_id}, uid={uid}，耗时 {duration}s")
 
@@ -4897,7 +4898,7 @@ async def restore_activity_timers():
 async def handle_expired_activity(
     chat_id: int, user_id: int, activity: str, start_time: datetime, nickname: str
 ):
-    """处理已过期的活动"""
+    """处理已过期的活动 - 释放名额"""
     try:
         now = get_beijing_time()
         elapsed = (now - start_time).total_seconds()
@@ -4916,6 +4917,11 @@ async def handle_expired_activity(
             chat_id, user_id, activity, int(elapsed), fine_amount, True
         )
 
+        # 🆕 关键：complete_user_activity 内部已经释放名额，这里只需要记录日志
+        logger.info(
+            f"✅ 自动结束过期活动: 用户{user_id} 活动{activity}，名额已自动释放"
+        )
+
         # 发送超时通知
         timeout_msg = (
             f"🔄 <b>系统恢复通知</b>\n"
@@ -4931,12 +4937,16 @@ async def handle_expired_activity(
                 timeout_msg += f"\n💰 超时罚款：<code>{fine_amount}</code> 元"
 
         await bot.send_message(chat_id, timeout_msg, parse_mode="HTML")
-        logger.info(
-            f"✅ 自动结束过期活动: 用户{user_id}({nickname}) 活动{activity} 时长{elapsed:.0f}秒"
-        )
 
     except Exception as e:
         logger.error(f"❌ 处理过期活动失败 用户{user_id}: {e}")
+        # 即使失败也要尝试释放名额
+        try:
+            await db.update_activity_participant_count(
+                chat_id, activity, increment=False
+            )
+        except:
+            pass
 
 
 # ==================== 月度报告任务优化 ====================
