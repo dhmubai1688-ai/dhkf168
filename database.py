@@ -760,8 +760,6 @@ class PostgreSQLDatabase:
 
             # 计算新的日期
             new_date = target_date
-            if target_date < self.get_beijing_date():
-                new_date = self.get_beijing_date()
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
@@ -780,11 +778,11 @@ class PostgreSQLDatabase:
                     users_updated = await conn.execute(
                         """
                         UPDATE users SET
-                            total_activity_count = 0,
-                            total_accumulated_time = 0,
-                            total_overtime_time = 0,
-                            overtime_count = 0,
-                            total_fines = 0,
+                            total_activity_count = NULL,
+                            total_accumulated_time = NULL,
+                            total_overtime_time = NULL,
+                            overtime_count = NULL,
+                            total_fines = NULL,
                             current_activity = NULL,
                             activity_start_time = NULL,
                             last_updated = $3,  
