@@ -166,6 +166,7 @@ class PostgreSQLDatabase:
                     activity_name TEXT PRIMARY KEY,
                     max_times INTEGER,
                     time_limit INTEGER,
+                    max_participants INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
@@ -452,13 +453,71 @@ class PostgreSQLDatabase:
         today = self.get_beijing_date()
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO users (chat_id, user_id, nickname, last_updated) VALUES ($1, $2, $3, $4) ON CONFLICT (chat_id, user_id) DO NOTHING",
+                """
+                INSERT INTO users (chat_id, user_id, nickname, last_updated) 
+                VALUES ($1, $2, $3, $4) 
+                ON CONFLICT (chat_id, user_id) 
+                DO UPDATE SET 
+                    nickname = COALESCE($3, users.nickname),
+                    last_updated = $4,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
                 chat_id,
                 user_id,
                 nickname,
                 today,
             )
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
+
+    async def cleanup_inactive_users(self, days: int = 30):
+        """清理长期未活动用户及其记录（安全版）"""
+
+        cutoff_date = (self.get_beijing_time() - timedelta(days=days)).date()
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+
+                # 找出要删除的用户列表（避免直接删）
+                users_to_delete = await conn.fetch(
+                    """
+                    SELECT user_id 
+                    FROM users
+                    WHERE last_updated < $1
+                    AND NOT EXISTS (
+                        SELECT 1 FROM monthly_statistics 
+                        WHERE monthly_statistics.chat_id = users.chat_id 
+                        AND monthly_statistics.user_id = users.user_id
+                    )
+                    """,
+                    cutoff_date,
+                )
+
+                user_ids = [u["user_id"] for u in users_to_delete]
+
+                if not user_ids:
+                    logger.info("🧹 无需清理用户")
+                    return 0
+
+                # 删除用户的日常记录
+                await conn.execute(
+                    "DELETE FROM user_activities WHERE user_id = ANY($1)",
+                    user_ids,
+                )
+
+                # 删除上下班记录（如果你需要）
+                await conn.execute(
+                    "DELETE FROM work_records WHERE user_id = ANY($1)",
+                    user_ids,
+                )
+
+                # 最后删除用户
+                deleted_count = await conn.execute(
+                    "DELETE FROM users WHERE user_id = ANY($1)",
+                    user_ids,
+                )
+
+        logger.info(f"🧹 清理了 {deleted_count} 个长期未活动的用户以及他们的所有记录")
+        return deleted_count
 
     async def get_user(self, chat_id: int, user_id: int) -> Optional[Dict]:
         """获取用户数据"""
@@ -657,8 +716,8 @@ class PostgreSQLDatabase:
                         new_date,
                     )
 
-                    # 重置用户统计数据和状态
-                    await conn.execute(
+                    # 🆕 优化：条件更新，避免不必要的数据写入
+                    users_updated = await conn.execute(
                         """
                         UPDATE users SET
                             total_activity_count = 0,
@@ -671,6 +730,13 @@ class PostgreSQLDatabase:
                             last_updated = $3,  
                             updated_at = CURRENT_TIMESTAMP
                         WHERE chat_id = $1 AND user_id = $2
+                        AND (
+                            total_activity_count > 0 
+                            OR total_accumulated_time > 0 
+                            OR total_fines > 0
+                            OR overtime_count > 0
+                            OR current_activity IS NOT NULL
+                        )
                         """,
                         chat_id,
                         user_id,
@@ -687,17 +753,31 @@ class PostgreSQLDatabase:
                 self._cache.pop(key, None)
                 self._cache_ttl.pop(key, None)
 
-            # 记录详细的重置日志
-            deleted_count = (
-                int(activities_deleted.split()[-1])
-                if activities_deleted and activities_deleted.startswith("DELETE")
-                else 0
-            )
+            # 🆕 修复：安全的删除计数解析
+            deleted_count = 0
+            if activities_deleted:
+                parts = activities_deleted.split()
+                if len(parts) >= 2 and parts[0] == "DELETE":
+                    try:
+                        deleted_count = int(parts[-1])
+                    except (ValueError, IndexError):
+                        deleted_count = 0
+
+            # 🆕 修复：安全的更新计数解析
+            updated_count = 0
+            if users_updated:
+                parts = users_updated.split()
+                if len(parts) >= 2 and parts[0] == "UPDATE":
+                    try:
+                        updated_count = int(parts[-1])
+                    except (ValueError, IndexError):
+                        updated_count = 0
 
             logger.info(
                 f"✅ 完整数据清除完成（保留月度统计）: 用户 {user_id} (群组 {chat_id})\n"
                 f"   📅 清除日期: {target_date} → {new_date}\n"
                 f"   🗑️ 删除活动记录: {deleted_count} 条\n"
+                f"   🔄 更新用户记录: {updated_count} 条\n"
                 f"   💾 月度统计: 已保留（不受清除影响）\n"
                 f"   📊 清除前状态:\n"
                 f"       - 活动次数: {user_before.get('total_activity_count', 0) if user_before else 0}\n"
@@ -979,6 +1059,68 @@ class PostgreSQLDatabase:
         """获取活动最大次数"""
         limits = await self.get_activity_limits()
         return limits.get(activity, {}).get("max_times", 0)
+
+    # ========== 活动参与人数限制相关操作 ==========
+    async def get_activity_participants_limit(self, activity: str) -> int:
+        """获取活动参与人数限制"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT max_participants FROM activity_configs WHERE activity_name = $1",
+                activity,
+            )
+            return row["max_participants"] if row else 0
+
+    async def update_activity_participants_limit(
+        self, activity: str, max_participants: int
+    ):
+        """更新活动参与人数限制"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE activity_configs 
+                SET max_participants = $1, created_at = CURRENT_TIMESTAMP 
+                WHERE activity_name = $2
+                """,
+                max_participants,
+                activity,
+            )
+            # 清理缓存
+            self._cache.pop("activity_limits", None)
+        logger.info(
+            f"✅ 已设置活动 '{activity}' 的参与人数上限为 {max_participants} 人"
+        )
+
+    async def get_current_participants_count(self, chat_id: int, activity: str) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM users 
+                WHERE chat_id = $1 AND current_activity = $2
+                """,
+                chat_id,
+                activity,
+            )
+            return count or 0
+
+    async def can_join_activity(
+        self, chat_id: int, activity: str
+    ) -> tuple[bool, int, int]:
+        """
+        检查是否可以加入活动
+        返回: (是否可以加入, 当前参与人数, 最大参与人数)
+        """
+        max_participants = await self.get_activity_participants_limit(activity)
+
+        # 如果最大参与人数为0，表示无限制
+        if max_participants == 0:
+            return True, 0, 0
+
+        current_count = await self.get_current_participants_count(chat_id, activity)
+
+        # 检查是否达到上限
+        can_join = current_count < max_participants
+        return can_join, current_count, max_participants
 
     async def activity_exists(self, activity: str) -> bool:
         """检查活动是否存在 - 修复版本"""
