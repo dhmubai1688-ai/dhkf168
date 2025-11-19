@@ -760,6 +760,8 @@ class PostgreSQLDatabase:
 
             # 计算新的日期
             new_date = target_date
+            if target_date < self.get_beijing_date():
+                new_date = self.get_beijing_date()
 
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
