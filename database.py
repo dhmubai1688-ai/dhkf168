@@ -778,11 +778,11 @@ class PostgreSQLDatabase:
                     users_updated = await conn.execute(
                         """
                         UPDATE users SET
-                            total_activity_count = NULL,
-                            total_accumulated_time = NULL,
-                            total_overtime_time = NULL,
-                            overtime_count = NULL,
-                            total_fines = NULL,
+                            total_activity_count = 0,
+                            total_accumulated_time = 0,
+                            total_overtime_time = 0,
+                            overtime_count = 0,
+                            total_fines = 0,
                             current_activity = NULL,
                             activity_start_time = NULL,
                             last_updated = $3,  
