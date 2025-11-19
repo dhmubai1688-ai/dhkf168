@@ -636,7 +636,7 @@ class PostgreSQLDatabase:
         fine_amount: int = 0,
         is_overtime: bool = False,
     ):
-        """完成用户活动 - 同时更新月度统计"""
+        """完成用户活动 - 同时更新月度统计并释放名额"""
         today = self.get_beijing_date()
         statistic_date = today.replace(day=1)  # 月度统计使用月初日期
 
@@ -727,9 +727,17 @@ class PostgreSQLDatabase:
                 query = f"UPDATE users SET {placeholders} WHERE chat_id = ${len(params)-1} AND user_id = ${len(params)}"
                 await conn.execute(query, *params)
 
+                # 🆕 关键修改：在事务内释放活动名额
+                await self.update_activity_participant_count(
+                    chat_id, activity, increment=False
+                )
+
+            # 事务提交后才清理缓存
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
-        logger.info(f"🔍 [数据库操作完成] 用户{user_id} 活动{activity} 完成更新")
+        logger.info(
+            f"🔍 [数据库操作完成] 用户{user_id} 活动{activity} 完成更新，名额已释放"
+        )
 
     async def reset_user_daily_data(
         self, chat_id: int, user_id: int, target_date: date | None = None
