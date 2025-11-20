@@ -341,15 +341,6 @@ except Exception as e:
     exit(1)
 
 
-# 🆕 在类定义后添加时区参数 - 使用 Config.DATABASE_URL
-if Config.DATABASE_URL and "timezone=Asia/Shanghai" not in Config.DATABASE_URL:
-    if "?" in Config.DATABASE_URL:
-        Config.DATABASE_URL += "&timezone=Asia/Shanghai"
-    else:
-        Config.DATABASE_URL += "?timezone=Asia/Shanghai"
-    print(f"✅ 数据库URL已添加时区参数: {Config.DATABASE_URL}")
-
-
 # === 环境工具类 ===
 class EnvUtils:
     """环境相关的工具类"""
@@ -451,5 +442,6 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
 
 
