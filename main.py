@@ -3932,84 +3932,91 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（修复版）——直接从 user_activities 聚合当天数据，避免依赖 last_updated"""
+    """显示排行榜（处理清除数据后的情况）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    # 确保群组初始化（如果你 init_group 有副作用）
     await db.init_group(chat_id)
-
-    # 读取活动列表（带缓存）
     activity_limits = await db.get_activity_limits_cached()
+
     if not activity_limits:
-        await message.answer(
-            "⚠️ 当前没有配置任何活动，无法生成排行榜。",
-            reply_markup=await get_main_keyboard(
-                chat_id=chat_id, show_admin=await is_admin(uid)
-            ),
-        )
+        await message.answer("⚠️ 当前没有配置任何活动，无法生成排行榜。")
         return
 
-    # 准备文本头
     rank_text = "🏆 今日活动排行榜\n\n"
-    today = db.get_beijing_date()
+    today = await db.get_beijing_date_from_db()
+    found_any_data = False
 
-    # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
-    top_n = 3
     async with db.pool.acquire() as conn:
-        any_result = False
         for act in activity_limits.keys():
+            # 🆕 查询：找今天有活动的用户（包括进行中的）
             rows = await conn.fetch(
                 """
-                SELECT
-                    u.user_id,
-                    u.nickname,
-                    ua.accumulated_time as total_time
+                -- 查询1：从 user_activities 表找有记录的用户（清除后可能为空）
+                SELECT 
+                    ua.user_id,
+                    COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
+                    ua.accumulated_time as total_time,
+                    ua.activity_count,
+                    'completed' as status
                 FROM user_activities ua
-                JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                WHERE ua.chat_id = $1 AND ua.activity_name = $2 AND ua.activity_date = $3
-                ORDER BY ua.accumulated_time DESC
-                LIMIT $4
+                LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
+                WHERE ua.chat_id = $1 
+                  AND ua.activity_date = $2 
+                  AND ua.activity_name = $3
+                  AND ua.accumulated_time > 0
+                
+                UNION ALL
+                
+                -- 查询2：从 users 表找当前有活动的用户
+                SELECT 
+                    u.user_id,
+                    COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
+                    0 as total_time,
+                    1 as activity_count,
+                    'active' as status
+                FROM users u
+                WHERE u.chat_id = $1 
+                  AND u.last_updated = $2
+                  AND u.current_activity = $3
+                
+                ORDER BY total_time DESC
+                LIMIT 3
                 """,
                 chat_id,
-                act,
                 today,
-                top_n,
+                act,
             )
 
-            if not rows:
-                # 跳过没有数据的活动（也可以显示“暂无记录”）
-                continue
+            if rows:
+                found_any_data = True
+                rank_text += f"📈 <code>{act}</code>：\n"
 
-            any_result = True
-            rank_text += f"📈 <code>{act}</code>：\n"
-            for i, row in enumerate(rows, start=1):
-                user_id = row["user_id"]
-                name = row["nickname"] or str(user_id)
-                time_sec = row["total_time"] or 0
-                # 你的 MessageFormatter.format_time / format_seconds_to_hms 根据项目定义来用
-                # 这里尽量使用项目里已有的工具：
-                try:
-                    time_str = MessageFormatter.format_time(int(time_sec))
-                except Exception:
-                    # 兜底格式化为秒->时分秒
-                    time_str = (
-                        db.format_seconds_to_hms(int(time_sec))
-                        if hasattr(db, "format_seconds_to_hms")
-                        else f"{int(time_sec)}s"
-                    )
+                for i, row in enumerate(rows, 1):
+                    user_id = row["user_id"]
+                    name = row["nickname"]
+                    time_sec = row["total_time"] or 0
+                    status = row["status"]
 
-                rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - <code>{time_str}</code>\n"
-            rank_text += "\n"
+                    if status == "completed" and time_sec > 0:
+                        time_str = MessageFormatter.format_time(int(time_sec))
+                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
+                    elif status == "active":
+                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
 
-    if not any_result:
-        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
+                rank_text += "\n"
+
+    if not found_any_data:
+        rank_text = (
+            "🏆 今日活动排行榜\n\n"
+            "📊 今日还没有活动记录\n"
+            "💪 开始第一个活动吧！\n\n"
+            "💡 提示：开始活动后会立即显示在这里"
+        )
 
     await message.answer(
         rank_text,
-        reply_markup=await get_main_keyboard(
-            chat_id=chat_id, show_admin=await is_admin(uid)
-        ),
+        reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
         parse_mode="HTML",
     )
 
