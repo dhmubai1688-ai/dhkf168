@@ -391,7 +391,7 @@ class MessageFormatter:
     @staticmethod
     def create_dashed_line():
         """创建短虚线分割线"""
-        return MessageFormatter.format_copyable_text("--------------------------")
+        return MessageFormatter.format_copyable_text("-------------------------")
 
     @staticmethod
     def format_copyable_text(text: str):
@@ -421,7 +421,7 @@ class MessageFormatter:
         if count >= max_times:
             message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
-        message += f"\n💡提示：活动完成后请及时输入'回座'或点击'✅ 回座'按钮"
+        message += f"\n💡提示：活动完成后请及时点击'✅ 回座'按钮"
 
         return message
 
@@ -3900,7 +3900,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（处理清除数据后的情况）"""
+    """显示排行榜（修复活动人数限制影响的问题）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3917,37 +3917,27 @@ async def show_rank(message: types.Message):
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # 🆕 查询：找今天有活动的用户（包括进行中的）
+            # 🆕 简化查询：移除复杂联合查询，直接查询当前状态
             rows = await conn.fetch(
                 """
-                -- 查询1：从 user_activities 表找有记录的用户（清除后可能为空）
-                SELECT 
-                    ua.user_id,
-                    COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
-                    ua.accumulated_time as total_time,
-                    ua.activity_count,
-                    'completed' as status
-                FROM user_activities ua
-                LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                WHERE ua.chat_id = $1 
-                  AND ua.activity_date = $2 
-                  AND ua.activity_name = $3
-                  AND ua.accumulated_time > 0
-                
-                UNION ALL
-                
-                -- 查询2：从 users 表找当前有活动的用户
+                -- 查询今日有活动的用户（包括已完成和进行中）
                 SELECT 
                     u.user_id,
                     COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
-                    0 as total_time,
-                    1 as activity_count,
-                    'active' as status
+                    COALESCE(ua.accumulated_time, 0) as total_time,
+                    COALESCE(ua.activity_count, 0) as activity_count,
+                    CASE 
+                        WHEN u.current_activity = $3 THEN 'active'
+                        WHEN COALESCE(ua.accumulated_time, 0) > 0 THEN 'completed'
+                        ELSE 'none'
+                    END as status
                 FROM users u
+                LEFT JOIN user_activities ua ON u.chat_id = ua.chat_id 
+                    AND u.user_id = ua.user_id 
+                    AND ua.activity_date = $2 
+                    AND ua.activity_name = $3
                 WHERE u.chat_id = $1 
-                  AND u.last_updated = $2
-                  AND u.current_activity = $3
-                
+                  AND (u.current_activity = $3 OR ua.accumulated_time > 0)
                 ORDER BY total_time DESC
                 LIMIT 3
                 """,
@@ -3957,10 +3947,15 @@ async def show_rank(message: types.Message):
             )
 
             if rows:
+                # 过滤掉完全没有数据的行
+                valid_rows = [row for row in rows if row["status"] != "none"]
+                if not valid_rows:
+                    continue
+                    
                 found_any_data = True
                 rank_text += f"📈 <code>{act}</code>：\n"
 
-                for i, row in enumerate(rows, 1):
+                for i, row in enumerate(valid_rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
                     time_sec = row["total_time"] or 0
@@ -3975,19 +3970,56 @@ async def show_rank(message: types.Message):
                 rank_text += "\n"
 
     if not found_any_data:
+        # 🆕 检查是否有任何当前进行中的活动
+        has_any_active = False
+        active_text = ""
+        
+        async with db.pool.acquire() as conn:
+            # 检查是否有任何用户有当前活动
+            active_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE chat_id = $1 AND current_activity IS NOT NULL",
+                chat_id,
+            )
+            
+            if active_count > 0:
+                has_any_active = True
+                # 获取所有当前活动
+                active_users = await conn.fetch(
+                    """
+                    SELECT user_id, nickname, current_activity 
+                    FROM users 
+                    WHERE chat_id = $1 AND current_activity IS NOT NULL
+                    ORDER BY user_id
+                    """,
+                    chat_id,
+                )
+                
+                active_text = "🟡 当前进行中的活动：\n"
+                for user in active_users:
+                    user_id = user["user_id"]
+                    nickname = user["nickname"] or f"用户{user_id}"
+                    activity = user["current_activity"]
+                    active_text += f"• {MessageFormatter.format_user_link(user_id, nickname)} - <code>{activity}</code>\n"
+                active_text += "\n"
+
         rank_text = (
             "🏆 今日活动排行榜\n\n"
-            "📊 今日还没有活动记录\n"
-            "💪 开始第一个活动吧！\n\n"
-            "💡 提示：开始活动后会立即显示在这里"
         )
+        
+        if has_any_active:
+            rank_text += active_text
+            rank_text += "📊 今日还没有完成的活动记录\n"
+            rank_text += "💪 活动完成后会显示在这里！"
+        else:
+            rank_text += "📊 今日还没有活动记录\n"
+            rank_text += "💪 开始第一个活动吧！\n\n"
+            rank_text += "💡 提示：开始活动后会立即显示在这里"
 
     await message.answer(
         rank_text,
         reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
         parse_mode="HTML",
     )
-
 
 # ==================== 回座功能优化 ====================
 
@@ -4137,7 +4169,7 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
             # 如果设置了人数限制，在回座消息中添加释放信息
             if max_participants > 0:
                 current_count = await db.get_current_participants_count(chat_id, act)
-                back_message += f"\n\n🔓 已释放 <code>{act}</code> 活动名额\n👥 当前参与: <code>{current_count}</code>/<code>{max_participants}</code> 人"
+                back_message += f"\n\n🔓 已释放 <code>{act}</code> 活动名额\n👥 当前h活动参与: <code>{current_count}</code>/<code>{max_participants}</code> 人"
 
             try:
                 await message.answer(
