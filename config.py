@@ -101,7 +101,7 @@ class Config:
     os.makedirs(BACKUP_DIR, exist_ok=True)  # 确保备份目录存在
 
     # === 管理员配置 ===
-    ADMIN_IDS = os.getenv("ADMIN_IDS", "8356418002,6607669683")  # 管理员ID列表
+    ADMIN_IDS = os.getenv("ADMIN_IDS", "")  # 管理员ID列表
     ADMINS = [int(x.strip()) for x in ADMIN_IDS.split(",") if x.strip()]  # 解析管理员ID
 
     # === 性能配置优化 ===
@@ -451,4 +451,5 @@ else:
 
     if "gunicorn" not in sys.modules and "uwsgi" not in sys.modules:
         print_startup_config()
+
 
