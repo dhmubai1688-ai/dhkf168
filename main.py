@@ -1219,6 +1219,8 @@ async def start_activity(message: types.Message, act: str):
     chat_id = message.chat.id
     uid = message.from_user.id
 
+    logger.info(f"🔄 [start_activity] 开始处理活动: {act} - 用户 {uid} - 群组 {chat_id}")
+
     user_lock = get_user_lock(chat_id, uid)
     async with user_lock:
         # 快速检查
