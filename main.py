@@ -3944,7 +3944,7 @@ async def show_rank(message: types.Message):
         return
 
     rank_text = "🏆 今日活动排行榜\n\n"
-    today = await db.get_beijing_date_from_db()
+    today = db.get_beijing_date()
     found_any_data = False
 
     async with db.pool.acquire() as conn:
