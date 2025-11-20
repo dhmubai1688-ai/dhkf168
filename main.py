@@ -3932,7 +3932,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（处理清除数据后的情况）"""
+    """显示排行榜（完整版）——显示已完成和进行中的活动"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3940,7 +3940,10 @@ async def show_rank(message: types.Message):
     activity_limits = await db.get_activity_limits_cached()
 
     if not activity_limits:
-        await message.answer("⚠️ 当前没有配置任何活动，无法生成排行榜。")
+        await message.answer(
+            "⚠️ 当前没有配置任何活动，无法生成排行榜。",
+            reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
+        )
         return
 
     rank_text = "🏆 今日活动排行榜\n\n"
@@ -3948,71 +3951,83 @@ async def show_rank(message: types.Message):
     found_any_data = False
 
     async with db.pool.acquire() as conn:
+        # 🆕 一次性获取所有进行中的活动（避免N+1查询）
+        active_users = await conn.fetch(
+            """
+            SELECT user_id, current_activity, nickname
+            FROM users 
+            WHERE chat_id = $1 AND current_activity IS NOT NULL AND last_updated = $2
+            """,
+            chat_id,
+            today,
+        )
+
+        # 构建进行中活动的字典：{活动名: [用户列表]}
+        active_dict = {}
+        for row in active_users:
+            activity = row["current_activity"]
+            if activity not in active_dict:
+                active_dict[activity] = []
+            active_dict[activity].append(
+                {
+                    "user_id": row["user_id"],
+                    "nickname": row["nickname"] or f"用户{row['user_id']}",
+                }
+            )
+
         for act in activity_limits.keys():
-            # 🆕 查询：找今天有活动的用户（包括进行中的）
-            rows = await conn.fetch(
+            # 查询已完成的活动
+            completed_rows = await conn.fetch(
                 """
-                -- 查询1：从 user_activities 表找有记录的用户（清除后可能为空）
-                SELECT 
+                SELECT
                     ua.user_id,
                     COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
                     ua.accumulated_time as total_time,
-                    ua.activity_count,
-                    'completed' as status
+                    ua.activity_count
                 FROM user_activities ua
                 LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                WHERE ua.chat_id = $1 
-                  AND ua.activity_date = $2 
-                  AND ua.activity_name = $3
-                  AND ua.accumulated_time > 0
-                
-                UNION ALL
-                
-                -- 查询2：从 users 表找当前有活动的用户
-                SELECT 
-                    u.user_id,
-                    COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
-                    0 as total_time,
-                    1 as activity_count,
-                    'active' as status
-                FROM users u
-                WHERE u.chat_id = $1 
-                  AND u.last_updated = $2
-                  AND u.current_activity = $3
-                
-                ORDER BY total_time DESC
-                LIMIT 3
+                WHERE ua.chat_id = $1 AND ua.activity_name = $2 AND ua.activity_date = $3
+                ORDER BY ua.accumulated_time DESC
+                LIMIT 5
                 """,
                 chat_id,
-                today,
                 act,
+                today,
             )
 
-            if rows:
-                found_any_data = True
-                rank_text += f"📈 <code>{act}</code>：\n"
+            # 获取进行中的用户（如果没有已完成记录）
+            active_for_act = active_dict.get(act, [])
 
-                for i, row in enumerate(rows, 1):
-                    user_id = row["user_id"]
-                    name = row["nickname"]
-                    time_sec = row["total_time"] or 0
-                    status = row["status"]
+            if not completed_rows and not active_for_act:
+                continue
 
-                    if status == "completed" and time_sec > 0:
-                        time_str = MessageFormatter.format_time(int(time_sec))
-                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
-                    elif status == "active":
-                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
+            found_any_data = True
+            rank_text += f"📈 <code>{act}</code>：\n"
 
-                rank_text += "\n"
+            # 显示已完成的活动
+            for i, row in enumerate(completed_rows, 1):
+                user_id = row["user_id"]
+                name = row["nickname"]
+                time_sec = row["total_time"] or 0
+                count = row["activity_count"] or 0
+
+                time_str = MessageFormatter.format_time(int(time_sec))
+                rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str} ({count}次)\n"
+
+            # 显示纯进行中的活动（没有历史记录的）
+            start_idx = len(completed_rows) + 1
+            for i, user_info in enumerate(active_for_act, start_idx):
+                # 检查这个用户是否已经在已完成列表中
+                user_in_completed = any(
+                    row["user_id"] == user_info["user_id"] for row in completed_rows
+                )
+                if not user_in_completed:
+                    rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_info['user_id'], user_info['nickname'])} - 进行中\n"
+
+            rank_text += "\n"
 
     if not found_any_data:
-        rank_text = (
-            "🏆 今日活动排行榜\n\n"
-            "📊 今日还没有活动记录\n"
-            "💪 开始第一个活动吧！\n\n"
-            "💡 提示：开始活动后会立即显示在这里"
-        )
+        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
 
     await message.answer(
         rank_text,
