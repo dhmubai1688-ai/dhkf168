@@ -3769,12 +3769,8 @@ async def handle_dynamic_activity_buttons(message: types.Message):
     chat_id = message.chat.id
     uid = message.from_user.id
 
-    # 🆕 添加调试日志
-    logger.info(f"🔍 [handle_dynamic_activity_buttons] 收到消息: '{text}' - 用户 {uid}")
-
     # 跳过命令和特殊按钮
     if text.startswith("/"):
-        logger.info(f"⏩ 跳过命令: {text}")
         return
 
     special_buttons = [
@@ -3788,31 +3784,19 @@ async def handle_dynamic_activity_buttons(message: types.Message):
         "🔴 下班",
     ]
     if text in special_buttons:
-        logger.info(f"⏩ 跳过特殊按钮: {text}")
         return
 
     # 🆕 关键修复：动态检查是否是活动按钮
     try:
-        logger.info(f"🔍 开始获取活动配置...")
         activity_limits = await db.get_activity_limits_cached()
-        logger.info(f"🔍 活动配置keys: {list(activity_limits.keys())}")
-        logger.info(f"🔍 按钮文本: '{text}'")
-        logger.info(f"🔍 文本是否在keys中: {text in activity_limits.keys()}")
-        
         if text in activity_limits.keys():
-            logger.info(f"✅ 识别为活动按钮: {text}")
+            logger.info(f"🔘 活动按钮点击: {text} - 用户 {uid}")
             await start_activity(message, text)
             return
-        else:
-            logger.warning(f"❌ 按钮文本 '{text}' 不在活动配置keys中")
-            
     except Exception as e:
         logger.error(f"❌ 处理活动按钮时出错: {e}")
-        import traceback
-        logger.error(f"❌ 详细错误: {traceback.format_exc()}")
 
     # 如果不是活动按钮，显示帮助信息
-    logger.info(f"ℹ️ 显示帮助信息")
     await message.answer(
         "请使用下方按钮或直接输入活动名称进行操作：\n\n"
         "📝 使用方法：\n"
@@ -3968,7 +3952,7 @@ async def show_rank(message: types.Message):
 
     # 准备文本头
     rank_text = "🏆 今日活动排行榜\n\n"
-    today = datetime.now().date()
+    today = db.get_beijing_date()
 
     # 为避免大量单次连接开销，我们直接用连接一次性查询每个活动的 TopN
     top_n = 3
