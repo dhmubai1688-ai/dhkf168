@@ -45,8 +45,15 @@ class PostgreSQLDatabase:
                 )
                 await self._initialize_impl()
                 logger.info("✅ PostgreSQL 数据库初始化完成")
+
+                # 🆕 设置时区应该在初始化成功后
+                async with self.pool.acquire() as conn:
+                    await conn.execute("SET timezone = 'Asia/Shanghai'")
+                    logger.info("✅ 数据库会话时区已设置为 Asia/Shanghai")
+
                 self._initialized = True
                 return
+
             except Exception as e:
                 logger.warning(f"⚠️ 数据库初始化第 {attempt + 1} 次失败: {e}")
                 if attempt == max_retries - 1:
