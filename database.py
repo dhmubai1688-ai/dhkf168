@@ -2069,6 +2069,91 @@ class PostgreSQLDatabase:
         else:
             return f"{minutes}分{secs}秒"
 
+    async def init_activity_limit_table(self):
+        """初始化活动人数限制表"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_user_limits (
+                    activity_name TEXT PRIMARY KEY,
+                    max_users INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+    async def set_activity_user_limit(self, activity: str, max_users: int):
+        """设置活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO activity_user_limits (activity_name, max_users)
+                VALUES ($1, $2)
+                ON CONFLICT (activity_name)
+                DO UPDATE SET 
+                    max_users = EXCLUDED.max_users,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                activity,
+                max_users,
+            )
+
+        # 清理缓存
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"✅ 设置活动人数限制: {activity} -> {max_users}人")
+
+    async def get_activity_user_limit(self, activity: str) -> int:
+        """获取活动人数限制"""
+        cache_key = f"activity_limit:{activity}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT max_users FROM activity_user_limits WHERE activity_name = $1",
+                activity,
+            )
+            limit = row["max_users"] if row else 0
+            self._set_cached(cache_key, limit, 60)
+            return limit
+
+    async def get_current_activity_users(self, chat_id: int, activity: str) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM users 
+                WHERE chat_id = $1 AND current_activity = $2
+            """,
+                chat_id,
+                activity,
+            )
+            return count or 0
+
+    async def remove_activity_user_limit(self, activity: str):
+        """移除活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM activity_user_limits WHERE activity_name = $1", activity
+            )
+
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"🗑️ 已移除活动人数限制: {activity}")
+
+    async def get_all_activity_limits(self) -> Dict[str, int]:
+        """获取所有活动的人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT activity_name, max_users FROM activity_user_limits"
+            )
+            return {row["activity_name"]: row["max_users"] for row in rows}
+
 
 # 全局数据库实例
 db = PostgreSQLDatabase()
