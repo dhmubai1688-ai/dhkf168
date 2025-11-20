@@ -715,14 +715,9 @@ class PostgreSQLDatabase:
             user_before = await self.get_user(chat_id, user_id)
             activities_before = await self.get_user_all_activities(chat_id, user_id)
 
-            # 计算新的日期
-            new_date = target_date
-            if target_date < self.get_beijing_date():
-                new_date = self.get_beijing_date()
-
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
-                    # 🆕 关键修改：使用 DELETE 真正清除记录
+                    # 🆕 关键修改：使用 target_date 而不是 new_date
                     activities_deleted = await conn.execute(
                         """
                         DELETE FROM user_activities 
@@ -730,7 +725,7 @@ class PostgreSQLDatabase:
                         """,
                         chat_id,
                         user_id,
-                        new_date,
+                        target_date,  # 🆕 使用 target_date
                     )
 
                     # 🆕 优化：条件更新，避免不必要的数据写入
@@ -757,7 +752,7 @@ class PostgreSQLDatabase:
                         """,
                         chat_id,
                         user_id,
-                        new_date,
+                        target_date,  # 🆕 使用 target_date
                     )
 
             # 清理相关缓存
@@ -792,7 +787,7 @@ class PostgreSQLDatabase:
 
             logger.info(
                 f"✅ 完整数据清除完成（保留月度统计）: 用户 {user_id} (群组 {chat_id})\n"
-                f"   📅 清除日期: {target_date} → {new_date}\n"
+                f"   📅 清除日期: {target_date}\n"  # 🆕 只显示 target_date
                 f"   🗑️ 删除活动记录: {deleted_count} 条\n"
                 f"   🔄 更新用户记录: {updated_count} 条\n"
                 f"   💾 月度统计: 已保留（不受清除影响）\n"
