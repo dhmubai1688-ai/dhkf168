@@ -212,24 +212,6 @@ class PostgreSQLDatabase:
                     UNIQUE(chat_id, user_id, statistic_date, activity_name)
                 )
                 """,
-                """
-                CREATE TABLE IF NOT EXISTS activity_participant_limits (
-                    activity_name TEXT PRIMARY KEY,
-                    max_participants INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """,
-                """
-                CREATE TABLE IF NOT EXISTS activity_current_participants (
-                id SERIAL PRIMARY KEY,
-                chat_id BIGINT,
-                user_id BIGINT,
-                activity_name TEXT,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(chat_id, user_id, activity_name)
-                )
-                """,
             ]
 
             for table_sql in tables:
@@ -1259,130 +1241,6 @@ class PostgreSQLDatabase:
             )
             logger.info(f"🧹 已清空 {checkin_type} 的旧罚款配置")
 
-    # ========== 活动人数限制相关操作 ==========
-    async def set_activity_participant_limit(
-        self, activity: str, max_participants: int
-    ):
-        """设置活动参与人数限制"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO activity_participant_limits (activity_name, max_participants)
-                VALUES ($1, $2)
-                ON CONFLICT (activity_name) 
-                DO UPDATE SET 
-                    max_participants = EXCLUDED.max_participants,
-                    updated_at = CURRENT_TIMESTAMP
-                """,
-                activity,
-                max_participants,
-            )
-            # 清理缓存
-            self._cache.pop(f"activity_limit:{activity}", None)
-            logger.info(f"✅ 设置活动人数限制: {activity} -> {max_participants}人")
-
-    async def get_activity_participant_limit(self, activity: str) -> int:
-        """获取活动参与人数限制"""
-        cache_key = f"activity_limit:{activity}"
-        cached = self._get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT max_participants FROM activity_participant_limits WHERE activity_name = $1",
-                activity,
-            )
-            limit = row["max_participants"] if row else 0
-            self._set_cached(cache_key, limit, 300)
-            return limit
-
-    async def remove_activity_participant_limit(self, activity: str):
-        """移除活动参与人数限制"""
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM activity_participant_limits WHERE activity_name = $1",
-                    activity,
-                )
-                await conn.execute(
-                    "DELETE FROM activity_current_participants WHERE activity_name = $1",
-                    activity,
-                )
-            # 清理缓存
-            self._cache.pop(f"activity_limit:{activity}", None)
-            logger.info(f"🗑️ 已移除活动人数限制: {activity}")
-
-    async def get_current_participants_count(self, chat_id: int, activity: str) -> int:
-        """获取当前参与指定活动的用户数量"""
-        async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
-                "SELECT COUNT(*) FROM activity_current_participants WHERE chat_id = $1 AND activity_name = $2",
-                chat_id,
-                activity,
-            )
-            return count or 0
-
-    async def add_activity_participant(
-        self, chat_id: int, user_id: int, activity: str
-    ) -> bool:
-        """添加活动参与者，返回是否成功添加"""
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    """
-                    INSERT INTO activity_current_participants (chat_id, user_id, activity_name)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (chat_id, user_id, activity_name) 
-                    DO NOTHING
-                    """,
-                    chat_id,
-                    user_id,
-                    activity,
-                )
-                return True
-            except Exception as e:
-                logger.warning(f"⚠️ 添加活动参与者失败: {e}")
-                return False
-
-    async def remove_activity_participant(
-        self, chat_id: int, user_id: int, activity: str
-    ):
-        """移除活动参与者"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM activity_current_participants WHERE chat_id = $1 AND user_id = $2 AND activity_name = $3",
-                chat_id,
-                user_id,
-                activity,
-            )
-            logger.debug(f"✅ 移除活动参与者: {chat_id}-{user_id}-{activity}")
-
-    async def get_activity_participant_limits(self) -> Dict[str, int]:
-        """获取所有活动的人数限制"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT activity_name, max_participants FROM activity_participant_limits"
-            )
-            return {row["activity_name"]: row["max_participants"] for row in rows}
-
-    async def is_activity_available(
-        self, chat_id: int, activity: str
-    ) -> tuple[bool, int, int]:
-        """检查活动是否可用（未达到人数限制）
-        返回: (是否可用, 当前人数, 最大人数)
-        """
-        max_participants = await self.get_activity_participant_limit(activity)
-
-        # 如果没有设置人数限制，则始终可用
-        if max_participants <= 0:
-            return True, 0, 0
-
-        current_count = await self.get_current_participants_count(chat_id, activity)
-        is_available = current_count < max_participants
-
-        return is_available, current_count, max_participants
-
     # ========== 推送设置操作 ==========
     async def get_push_settings(self) -> Dict:
         """获取推送设置"""
@@ -2210,6 +2068,91 @@ class PostgreSQLDatabase:
             return f"{hours}时{minutes}分{secs}秒"
         else:
             return f"{minutes}分{secs}秒"
+
+    async def init_activity_limit_table(self):
+        """初始化活动人数限制表"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activity_user_limits (
+                    activity_name TEXT PRIMARY KEY,
+                    max_users INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+    async def set_activity_user_limit(self, activity: str, max_users: int):
+        """设置活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO activity_user_limits (activity_name, max_users)
+                VALUES ($1, $2)
+                ON CONFLICT (activity_name)
+                DO UPDATE SET 
+                    max_users = EXCLUDED.max_users,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                activity,
+                max_users,
+            )
+
+        # 清理缓存
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"✅ 设置活动人数限制: {activity} -> {max_users}人")
+
+    async def get_activity_user_limit(self, activity: str) -> int:
+        """获取活动人数限制"""
+        cache_key = f"activity_limit:{activity}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT max_users FROM activity_user_limits WHERE activity_name = $1",
+                activity,
+            )
+            limit = row["max_users"] if row else 0
+            self._set_cached(cache_key, limit, 60)
+            return limit
+
+    async def get_current_activity_users(self, chat_id: int, activity: str) -> int:
+        """获取当前正在进行指定活动的用户数量"""
+        async with self.pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM users 
+                WHERE chat_id = $1 AND current_activity = $2
+            """,
+                chat_id,
+                activity,
+            )
+            return count or 0
+
+    async def remove_activity_user_limit(self, activity: str):
+        """移除活动人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM activity_user_limits WHERE activity_name = $1", activity
+            )
+
+        self._cache.pop(f"activity_limit:{activity}", None)
+        logger.info(f"🗑️ 已移除活动人数限制: {activity}")
+
+    async def get_all_activity_limits(self) -> Dict[str, int]:
+        """获取所有活动的人数限制"""
+        await self.init_activity_limit_table()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT activity_name, max_users FROM activity_user_limits"
+            )
+            return {row["activity_name"]: row["max_users"] for row in rows}
 
 
 # 全局数据库实例
