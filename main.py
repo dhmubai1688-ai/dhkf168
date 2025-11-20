@@ -3928,7 +3928,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜 - 修复重置后数据一致性"""
+    """显示排行榜 - 只显示重置后的活动"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3945,38 +3945,19 @@ async def show_rank(message: types.Message):
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # ✅ 修复：同时查询 user_activities 和 users 表
+            # ✅ 修复：只查询重置后开始的活动
             rows = await conn.fetch(
                 """
-                -- 查询1：从 user_activities 表找已完成的活动
-                SELECT 
-                    ua.user_id,
-                    COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
-                    ua.accumulated_time as total_time,
-                    ua.activity_count,
-                    'completed' as status
-                FROM user_activities ua
-                LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                WHERE ua.chat_id = $1 
-                  AND ua.activity_date = $2 
-                  AND ua.activity_name = $3
-                  AND ua.accumulated_time > 0
-                
-                UNION ALL
-                
-                -- 查询2：从 users 表找当前正在进行的活动
+                -- 查询当前正在进行的活动（重置后开始的）
                 SELECT 
                     u.user_id,
                     COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
-                    0 as total_time,
-                    1 as activity_count,
                     'active' as status
                 FROM users u
                 WHERE u.chat_id = $1 
                   AND u.last_updated = $2
                   AND u.current_activity = $3
-                
-                ORDER BY total_time DESC
+                ORDER BY u.user_id
                 LIMIT 3
                 """,
                 chat_id,
@@ -3991,13 +3972,7 @@ async def show_rank(message: types.Message):
                 for i, row in enumerate(rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
-                    status = row["status"]
-
-                    if status == "completed" and row["total_time"] > 0:
-                        time_str = MessageFormatter.format_time(int(row["total_time"]))
-                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
-                    elif status == "active":
-                        rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
+                    rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
 
                 rank_text += "\n"
 
