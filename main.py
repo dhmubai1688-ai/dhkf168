@@ -1135,6 +1135,25 @@ async def _start_activity_locked(
         )
         return
 
+    # 🆕 检查活动人数限制
+    user_limit = await db.get_activity_user_limit(act)
+    if user_limit > 0:
+        current_users = await db.get_current_activity_users(chat_id, act)
+        if current_users >= user_limit:
+            await message.answer(
+                f"❌ 活动 '<code>{act}</code>' 人数已满！\n\n"
+                f"📊 当前状态：\n"
+                f"• 限制人数：<code>{user_limit}</code> 人\n"
+                f"• 当前进行：<code>{current_users}</code> 人\n"
+                f"• 剩余名额：<code>0</code> 人\n\n"
+                f"💡 请等待其他用户回座后再尝试",
+                reply_markup=await get_main_keyboard(
+                    chat_id=chat_id, show_admin=await is_admin(uid)
+                ),
+                parse_mode="HTML",
+            )
+            return
+
     can_perform, reason = await can_perform_activities(chat_id, uid)
     if not can_perform:
         await message.answer(
@@ -1491,6 +1510,188 @@ async def cmd_delactivity(message: types.Message):
         reply_markup=await get_main_keyboard(chat_id=message.chat.id, show_admin=True),
         parse_mode="HTML",
     )
+
+
+# ==================== 活动人数限制功能 ====================
+
+
+@dp.message(Command("actnum"))
+@admin_required
+@rate_limit(rate=3, per=30)
+async def cmd_actnum(message: types.Message):
+    """设置活动人数限制"""
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer(
+            "❌ 用法：/actnum <活动名> <人数限制>\n"
+            "例如：/actnum 小厕 3\n"
+            "💡 设置为0表示取消限制",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+        return
+
+    try:
+        activity = args[1]
+        max_users = int(args[2])
+
+        # 检查活动是否存在
+        if not await db.activity_exists(activity):
+            await message.answer(
+                f"❌ 活动 '<code>{activity}</code>' 不存在！",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+                parse_mode="HTML",
+            )
+            return
+
+        if max_users < 0:
+            await message.answer(
+                "❌ 人数限制不能为负数！",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+            )
+            return
+
+        chat_id = message.chat.id
+
+        if max_users == 0:
+            # 取消限制
+            await db.remove_activity_user_limit(activity)
+            await message.answer(
+                f"✅ 已取消活动 '<code>{activity}</code>' 的人数限制",
+                reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+                parse_mode="HTML",
+            )
+        else:
+            # 设置限制
+            await db.set_activity_user_limit(activity, max_users)
+
+            # 获取当前活动人数
+            current_users = await db.get_current_activity_users(chat_id, activity)
+
+            await message.answer(
+                f"✅ 已设置活动 '<code>{activity}</code>' 的人数限制为 <code>{max_users}</code> 人\n\n"
+                f"📊 当前状态：\n"
+                f"• 限制人数：<code>{max_users}</code> 人\n"
+                f"• 当前进行：<code>{current_users}</code> 人\n"
+                f"• 剩余名额：<code>{max_users - current_users}</code> 人",
+                reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+                parse_mode="HTML",
+            )
+
+    except ValueError:
+        await message.answer(
+            "❌ 人数限制必须是数字！",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ 设置失败：{e}",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
+
+
+@dp.message(Command("actstatus"))
+@rate_limit(rate=5, per=60)
+async def cmd_actstatus(message: types.Message):
+    """查看活动人数状态"""
+    chat_id = message.chat.id
+
+    try:
+        # 获取所有活动限制
+        activity_limits = await db.get_all_activity_limits()
+
+        if not activity_limits:
+            await message.answer(
+                "📊 当前没有设置任何活动人数限制\n"
+                "💡 使用 /actnum <活动名> <人数> 来设置限制",
+                reply_markup=await get_main_keyboard(
+                    chat_id=chat_id, show_admin=await is_admin(message.from_user.id)
+                ),
+            )
+            return
+
+        status_text = "📊 活动人数限制状态\n\n"
+
+        for activity, max_users in activity_limits.items():
+            current_users = await db.get_current_activity_users(chat_id, activity)
+            remaining = max_users - current_users
+
+            status_icon = "🟢" if remaining > 0 else "🔴"
+
+            status_text += (
+                f"{status_icon} <code>{activity}</code>\n"
+                f"   • 限制：<code>{max_users}</code> 人\n"
+                f"   • 当前：<code>{current_users}</code> 人\n"
+                f"   • 剩余：<code>{remaining}</code> 人\n\n"
+            )
+
+        status_text += "💡 绿色表示还有名额，红色表示已满员"
+
+        await message.answer(
+            status_text,
+            reply_markup=await get_main_keyboard(
+                chat_id=chat_id, show_admin=await is_admin(message.from_user.id)
+            ),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        await message.answer(
+            f"❌ 获取状态失败：{e}",
+            reply_markup=await get_main_keyboard(
+                chat_id=chat_id, show_admin=await is_admin(message.from_user.id)
+            ),
+        )
+
+
+@dp.message(Command("actlist"))
+@admin_required
+@rate_limit(rate=3, per=30)
+async def cmd_actlist(message: types.Message):
+    """查看所有活动人数限制设置"""
+    try:
+        activity_limits = await db.get_all_activity_limits()
+
+        if not activity_limits:
+            await message.answer(
+                "📝 当前没有设置任何活动人数限制",
+                reply_markup=await get_main_keyboard(
+                    chat_id=message.chat.id, show_admin=True
+                ),
+            )
+            return
+
+        list_text = "📝 活动人数限制列表\n\n"
+
+        for activity, max_users in activity_limits.items():
+            list_text += f"• <code>{activity}</code>：<code>{max_users}</code> 人\n"
+
+        list_text += f"\n💡 共 {len(activity_limits)} 个活动设置了人数限制"
+
+        await message.answer(
+            list_text,
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        await message.answer(
+            f"❌ 获取列表失败：{e}",
+            reply_markup=await get_main_keyboard(
+                chat_id=message.chat.id, show_admin=True
+            ),
+        )
 
 
 @dp.message(Command("set"))
@@ -3727,7 +3928,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（处理清除数据后的情况）"""
+    """显示排行榜 - 修复重置后数据一致性"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3744,10 +3945,10 @@ async def show_rank(message: types.Message):
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # 🆕 查询：找今天有活动的用户（包括进行中的）
+            # ✅ 修复：同时查询 user_activities 和 users 表
             rows = await conn.fetch(
                 """
-                -- 查询1：从 user_activities 表找有记录的用户（清除后可能为空）
+                -- 查询1：从 user_activities 表找已完成的活动
                 SELECT 
                     ua.user_id,
                     COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
@@ -3763,7 +3964,7 @@ async def show_rank(message: types.Message):
                 
                 UNION ALL
                 
-                -- 查询2：从 users 表找当前有活动的用户
+                -- 查询2：从 users 表找当前正在进行的活动
                 SELECT 
                     u.user_id,
                     COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
@@ -3790,11 +3991,10 @@ async def show_rank(message: types.Message):
                 for i, row in enumerate(rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
-                    time_sec = row["total_time"] or 0
                     status = row["status"]
 
-                    if status == "completed" and time_sec > 0:
-                        time_str = MessageFormatter.format_time(int(time_sec))
+                    if status == "completed" and row["total_time"] > 0:
+                        time_str = MessageFormatter.format_time(int(row["total_time"]))
                         rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
                     elif status == "active":
                         rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
