@@ -3928,7 +3928,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜 - 只显示重置后的活动"""
+    """显示排行榜——基于 user_activities 当天数据"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3936,53 +3936,49 @@ async def show_rank(message: types.Message):
     activity_limits = await db.get_activity_limits_cached()
 
     if not activity_limits:
-        await message.answer("⚠️ 当前没有配置任何活动，无法生成排行榜。")
+        await message.answer("⚠️ 未配置任何活动，无法生成排行榜。")
         return
 
-    rank_text = "🏆 今日活动排行榜\n\n"
     today = datetime.now().date()
-    found_any_data = False
+    rank_text = "🏆 今日活动排行榜\n\n"
+    found_any = False
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # ✅ 修复：只查询重置后开始的活动
             rows = await conn.fetch(
                 """
-                -- 查询当前正在进行的活动（重置后开始的）
                 SELECT 
-                    u.user_id,
-                    COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
-                    'active' as status
-                FROM users u
-                WHERE u.chat_id = $1 
-                  AND u.last_updated = $2
-                  AND u.current_activity = $3
-                ORDER BY u.user_id
+                    ua.user_id,
+                    COALESCE(u.nickname, '用户' || ua.user_id::text) AS nickname,
+                    ua.activity_count AS count,
+                    ua.accumulated_time AS time
+                FROM user_activities ua
+                LEFT JOIN users u 
+                    ON u.user_id = ua.user_id AND u.chat_id = ua.chat_id
+                WHERE ua.chat_id = $1
+                  AND ua.activity_name = $2      -- ✅ 修正字段名
+                  AND ua.activity_date = $3      -- ✅ 用今日日期过滤
+                ORDER BY ua.accumulated_time DESC
                 LIMIT 3
                 """,
-                chat_id,
-                today,
-                act,
+                chat_id, act, today
             )
 
             if rows:
-                found_any_data = True
+                found_any = True
                 rank_text += f"📈 <code>{act}</code>：\n"
-
                 for i, row in enumerate(rows, 1):
-                    user_id = row["user_id"]
-                    name = row["nickname"]
-                    rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
-
+                    rank_text += (
+                        f"  <code>{i}.</code> "
+                        f"{MessageFormatter.format_user_link(row['user_id'], row['nickname'])} "
+                        f"- ⏱️ {MessageFormatter.format_time(row['time'])} "
+                        f"({row['count']}次)\n"  # ✅ 添加次数显示
+                    )
                 rank_text += "\n"
 
-    if not found_any_data:
-        rank_text = (
-            "🏆 今日活动排行榜\n\n"
-            "📊 今日还没有活动记录\n"
-            "💪 开始第一个活动吧！\n\n"
-            "💡 提示：开始活动后会立即显示在这里"
-        )
+    if not found_any:
+        rank_text += "📊 今日还没有活动记录\n"
+        rank_text += "💪 开始第一个活动吧！"
 
     await message.answer(
         rank_text,
