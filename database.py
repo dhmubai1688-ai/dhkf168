@@ -1550,15 +1550,17 @@ class PostgreSQLDatabase:
             target_date = self.get_beijing_date()
 
         async with self.pool.acquire() as conn:
-            # 🆕 关键修复：不依赖 last_updated，直接查询 user_activities 表
+            # 🆕 关键修复：包含罚款和超时数据的完整查询
             users = await conn.fetch(
                 """
-                SELECT DISTINCT u.user_id, u.nickname, 
+                SELECT DISTINCT 
+                    u.user_id, 
+                    u.nickname,
                     COALESCE(ua_total.total_accumulated_time, 0) as total_accumulated_time,
                     COALESCE(ua_total.total_activity_count, 0) as total_activity_count,
-                    COALESCE(u.total_fines, 0) as total_fines,
-                    COALESCE(u.overtime_count, 0) as overtime_count,
-                    COALESCE(u.total_overtime_time, 0) as total_overtime_time
+                    COALESCE(u.total_fines, 0) as total_fines,  -- 🆕 罚款总额
+                    COALESCE(u.overtime_count, 0) as overtime_count,  -- 🆕 超时次数
+                    COALESCE(u.total_overtime_time, 0) as total_overtime_time  -- 🆕 总超时时间
                 FROM users u
                 LEFT JOIN (
                     SELECT user_id, 
@@ -1569,9 +1571,13 @@ class PostgreSQLDatabase:
                     GROUP BY user_id
                 ) ua_total ON u.user_id = ua_total.user_id
                 WHERE u.chat_id = $1 
-                AND EXISTS (
-                    SELECT 1 FROM user_activities 
-                    WHERE chat_id = $1 AND user_id = u.user_id AND activity_date = $2
+                AND (
+                    EXISTS (
+                        SELECT 1 FROM user_activities 
+                        WHERE chat_id = $1 AND user_id = u.user_id AND activity_date = $2
+                    )
+                    OR u.total_fines > 0  -- 🆕 包含有罚款的用户
+                    OR u.overtime_count > 0  -- 🆕 包含有超时的用户
                 )
                 """,
                 chat_id,
