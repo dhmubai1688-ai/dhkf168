@@ -848,6 +848,7 @@ class PostgreSQLDatabase:
                         UPDATE users SET
                             total_activity_count = 0,
                             total_accumulated_time = 0,
+                            total_fines = 0,
                             total_overtime_time = 0,
                             overtime_count = 0,
                             current_activity = NULL,
