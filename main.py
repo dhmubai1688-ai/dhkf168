@@ -3712,50 +3712,58 @@ async def handle_admin_panel_button(message: types.Message):
 
     admin_text = (
         "👑 管理员面板\n\n"
-        "可用命令：\n"
+        "📢 频道与推送管理：\n"
         "• /setchannel <频道ID> - 绑定提醒频道\n"
         "• /setgroup <群组ID> - 绑定通知群组\n"
         "• /unbindchannel - 解除绑定频道\n"
         "• /unbindgroup - 解除绑定通知群组\n"
         "• /setpush <channel|group|admin> <on|off> - 设置推送开关\n"
         "• /showpush - 显示推送设置状态\n"
-        "• \n"
+        "• /testpush - 测试推送功能\n\n"
+        "🎯 活动管理：\n"
         "• /addactivity <活动名> <次数> <分钟> - 添加或修改活动\n"
         "• /delactivity <活动名> - 删除活动\n"
-        "• \n"
-        "• /setworktime 9:00 18:00 - 设置上下班时间\n"
-        "• /delwork - 基本移除，保留历史记录\n"
-        "• /delwork_clear - 移除并清除所有记录\n"
-        "• /workstatus - 查看当前上下班功能状态\n"
-        "• /worktime  - 查看当前群组工作时间设置\n"
-        "• /reset_work 用户ID - 可以重置用户记录\n"
-        "• /resetworktime - 重置为默认上下班时间\n"
-        "• \n"
+        "• /actnum <活动名> <人数> - 设置活动人数限制\n"
+        "• /actstatus - 查看活动人数状态\n"
+        "• /actlist - 查看所有活动人数限制\n"
+        "• /refresh_keyboard - 强制刷新键盘\n\n"
+        "🕒 上下班管理：\n"
+        "• /setworktime <上班时间> <下班时间> - 设置上下班时间\n"
+        "• /worktime - 查看当前工作时间设置\n"
+        "• /resetworktime - 重置为默认时间\n"
+        "• /delwork - 移除功能(保留记录)\n"
+        "• /delwork_clear - 移除功能并清除记录\n"
+        "• /workstatus - 查看功能状态\n"
+        "• /workcheck - 查看个人状态\n"
+        "• /workrecord - 查看个人记录\n"
+        "• /reset_work <用户ID> - 重置用户记录\n\n"
+        "⚙️ 系统设置：\n"
+        "• /setresettime <小时> <分钟> - 设置每日重置时间\n"
+        "• /setworkfine <类型> <分钟1> <金额1> [分钟2 金额2...] - 设置上下班罚款\n"
+        "• /setfine <活动名> <时间段> <金额> - 设置活动罚款\n"
+        "• /setfines_all <t1> <f1> [t2 f2...] - 统一设置分段罚款\n"
+        "• /showsettings - 查看当前设置\n"
+        "• /reset_status - 查看重置状态\n\n"
+        "📊 数据管理：\n"
         "• /set <用户ID> <活动> <分钟> - 设置用户时间\n"
         "• /reset <用户ID> - 重置用户数据\n"
-        "• \n"
-        "• /setresettime <小时> <分钟> - 设置每日重置时间\n"
-        "• /setworkfine <work_start|work_end> <时间段> <金额> - 设置上下班罚款\n"
-        "• \n"
-        "• /setfine <活动名> <时间段> <金额> - 设置活动罚款费率\n"
-        "• /setfines_all <t1> <f1> [<t2> <f2> ...] - 为所有活动统一设置分段罚款\n"
-        "• \n"
-        "• /showsettings - 查看当前群设置\n"
-        "• /reset_status - 查看重置状态\n"
-        "• \n"
+        "• /export - 导出当前数据\n"
         "• /exportmonthly - 导出月度数据\n"
-        "• /exportmonthly 2024 1 - 导出指定年月数据\n"
-        "• /monthlyreport - 生成最近一个月报告\n"
-        "• /monthlyreport <年> <月> - 生成指定年月报告\n"
-        "• /export - 导出数据\n\n"
-        "• /cleanup_monthly - 清理月度统计数据\n"
-        "• /cleanup_monthly 2024 1 - 清理指定年月数据\n"
-        "• /monthly_stats_status - 查看月度统计状态\n\n"
-        "• /cleanup_inactive - 清理user与user_activities默认30天\n\n"
-        "• /performance 查看性能\n"
-        "• /refresh_keyboard - 强制刷新键盘显示新活动\n"
-        "• /debug_work - 调试上下班功能状态\n"
-        "• \n"
+        "• /exportmonthly <年> <月> - 导出指定年月\n"
+        "• /monthlyreport - 生成月度报告\n"
+        "• /monthlyreport <年> <月> - 生成指定报告\n\n"
+        "🧹 维护工具：\n"
+        "• /cleanup_monthly - 清理月度数据\n"
+        "• /cleanup_monthly <年> <月> - 清理指定月份\n"
+        "• /cleanup_monthly all - 清理所有数据\n"
+        "• /monthly_stats_status - 查看统计状态\n"
+        "• /cleanup_inactive [天数] - 清理未活动用户\n\n"
+        "🔧 系统监控：\n"
+        "• /performance - 查看性能\n"
+        "• /debug_work - 调试上下班功能\n"
+        "• /menu - 返回主菜单\n"
+        "• /help - 查看详细帮助\n\n"
+        "💡 提示：所有时间均为北京时间，参数用空格分隔"
     )
     await message.answer(admin_text, reply_markup=get_admin_keyboard())
 
@@ -3932,7 +3940,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（优化最终版）"""
+    """显示排行榜（完整功能版）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3949,39 +3957,44 @@ async def show_rank(message: types.Message):
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # 🎯 您的优秀查询 + 小优化
+            # 🎯 修复：保留次数统计的完整查询
             rows = await conn.fetch(
                 """
-                -- 查询1：已完成的活动
-                SELECT 
-                    ua.user_id,
-                    COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
-                    ua.accumulated_time as total_time,
-                    ua.activity_count,
-                    'completed' as status,
-                    NULL as activity_start_time
-                FROM user_activities ua
-                LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
-                WHERE ua.chat_id = $1 
-                  AND ua.activity_date = $2 
-                  AND ua.activity_name = $3
-                  AND ua.accumulated_time > 0
-                
-                UNION ALL
-                
-                -- 查询2：进行中的活动（🎯 修复：移除 last_updated 限制）
-                SELECT 
-                    u.user_id,
-                    COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
-                    0 as total_time,
-                    0 as activity_count,
-                    'active' as status,
-                    u.activity_start_time
-                FROM users u
-                WHERE u.chat_id = $1 
-                  AND u.current_activity = $3  -- 🎯 关键修复：移除 last_updated = $2
-                
-                ORDER BY total_time DESC
+                WITH ranked_activities AS (
+                    -- 已完成的活动
+                    SELECT 
+                        ua.user_id,
+                        COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
+                        ua.accumulated_time as total_time,
+                        ua.activity_count,
+                        'completed' as status,
+                        NULL as activity_start_time,
+                        ua.accumulated_time as sort_key  -- 按累计时间排序
+                    FROM user_activities ua
+                    LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
+                    WHERE ua.chat_id = $1 
+                      AND ua.activity_date = $2 
+                      AND ua.activity_name = $3
+                      AND ua.accumulated_time > 0
+                    
+                    UNION
+                    
+                    -- 进行中的活动
+                    SELECT 
+                        u.user_id,
+                        COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
+                        0 as total_time,
+                        0 as activity_count,
+                        'active' as status,
+                        u.activity_start_time,
+                        -- 🎯 关键优化：进行中活动按持续时间排序
+                        EXTRACT(epoch FROM (CURRENT_TIMESTAMP - u.activity_start_time::timestamp)) as sort_key
+                    FROM users u
+                    WHERE u.chat_id = $1 
+                      AND u.current_activity = $3
+                )
+                SELECT * FROM ranked_activities 
+                ORDER BY sort_key DESC
                 LIMIT 5
                 """,
                 chat_id,
@@ -3993,18 +4006,19 @@ async def show_rank(message: types.Message):
                 found_any_data = True
                 rank_text += f"📈 <code>{act}</code>：\n"
 
-                # 🎯 优化：添加持续时间显示
                 for i, row in enumerate(rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
                     time_sec = row["total_time"] or 0
                     status = row["status"]
+                    activity_count = row["activity_count"] or 0  # 🎯 修复：获取次数
 
                     if status == "completed" and time_sec > 0:
                         time_str = MessageFormatter.format_time(int(time_sec))
-                        rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
+                        # 🎯 修复：显示次数统计
+                        rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str} ({activity_count}次)\n"
                     elif status == "active":
-                        # 🎯 添加进行中持续时间
+                        # 计算进行中活动的持续时间
                         duration_info = ""
                         if row["activity_start_time"]:
                             try:
@@ -4018,12 +4032,21 @@ async def show_rank(message: types.Message):
                                 duration_info = f" ({MessageFormatter.format_time(elapsed_seconds)})"
                             except Exception:
                                 duration_info = ""
-                        rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_id, name)} - 进行中{duration_info}\n"
+                        # 🎯 修复：进行中也显示次数（如果有的话）
+                        count_info = (
+                            f" ({activity_count}次)" if activity_count > 0 else ""
+                        )
+                        rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_id, name)} - 进行中{duration_info}{count_info}\n"
 
                 rank_text += "\n"
 
     if not found_any_data:
-        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
+        rank_text = (
+            "🏆 今日活动排行榜\n\n"
+            "📊 今日还没有活动记录\n"
+            "💪 开始第一个活动吧！\n\n"
+            "💡 提示：开始活动后会立即显示在这里"
+        )
 
     await message.answer(
         rank_text,
@@ -5929,4 +5952,3 @@ async def preload_frequent_data():
 #     except Exception as e:
 #         logger.error(f"💥 机器人异常退出: {e}")
 #         sys.exit(1)
-
