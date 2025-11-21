@@ -421,7 +421,7 @@ class MessageFormatter:
         if count >= max_times:
             message += f"\n🚨 警告：本次结束后，您今日的{MessageFormatter.format_copyable_text(activity)}次数将达到上限，请留意！"
 
-        message += f"\n💡提示：活动完成后请及时点击'✅ 回座'按钮"
+        message += f"\n💡提示：活动完成后请及时输入'回座'或点击'✅ 回座'按钮"
 
         return message
 
@@ -1146,7 +1146,7 @@ async def _start_activity_locked(
                 f"• 限制人数：<code>{user_limit}</code> 人\n"
                 f"• 当前进行：<code>{current_users}</code> 人\n"
                 f"• 剩余名额：<code>0</code> 人\n\n"
-                f"💡 请等待其他用户回座后再尝试",
+                f"💡 请等待其他用户回座后再打卡进行此活动",
                 reply_markup=await get_main_keyboard(
                     chat_id=chat_id, show_admin=await is_admin(uid)
                 ),
@@ -3932,7 +3932,7 @@ async def show_history(message: types.Message):
 
 
 async def show_rank(message: types.Message):
-    """显示排行榜（优化版）"""
+    """显示排行榜（优化最终版）"""
     chat_id = message.chat.id
     uid = message.from_user.id
 
@@ -3940,10 +3940,7 @@ async def show_rank(message: types.Message):
     activity_limits = await db.get_activity_limits_cached()
 
     if not activity_limits:
-        await message.answer(
-            "⚠️ 当前没有配置任何活动，无法生成排行榜。",
-            reply_markup=await get_main_keyboard(chat_id, await is_admin(uid)),
-        )
+        await message.answer("⚠️ 当前没有配置任何活动，无法生成排行榜。")
         return
 
     rank_text = "🏆 今日活动排行榜\n\n"
@@ -3952,79 +3949,81 @@ async def show_rank(message: types.Message):
 
     async with db.pool.acquire() as conn:
         for act in activity_limits.keys():
-            # 优化查询：获取已完成活动的排行榜 + 检查是否有进行中的活动
+            # 🎯 您的优秀查询 + 小优化
             rows = await conn.fetch(
                 """
-                -- 获取已完成活动的Top 3
+                -- 查询1：已完成的活动
                 SELECT 
                     ua.user_id,
                     COALESCE(u.nickname, '用户' || ua.user_id::text) as nickname,
                     ua.accumulated_time as total_time,
-                    TRUE as has_data
+                    ua.activity_count,
+                    'completed' as status,
+                    NULL as activity_start_time
                 FROM user_activities ua
                 LEFT JOIN users u ON ua.chat_id = u.chat_id AND ua.user_id = u.user_id
                 WHERE ua.chat_id = $1 
                   AND ua.activity_date = $2 
                   AND ua.activity_name = $3
                   AND ua.accumulated_time > 0
-                ORDER BY ua.accumulated_time DESC
-                LIMIT 3
-                """,
-                chat_id,
-                today,
-                act,
-            )
-
-            # 检查是否有进行中的活动但尚未记录
-            active_users = await conn.fetch(
-                """
-                SELECT DISTINCT u.user_id, u.nickname
+                
+                UNION ALL
+                
+                -- 查询2：进行中的活动（🎯 修复：移除 last_updated 限制）
+                SELECT 
+                    u.user_id,
+                    COALESCE(u.nickname, '用户' || u.user_id::text) as nickname,
+                    0 as total_time,
+                    0 as activity_count,
+                    'active' as status,
+                    u.activity_start_time
                 FROM users u
                 WHERE u.chat_id = $1 
-                  AND u.last_updated = $2
-                  AND u.current_activity = $3
-                  AND NOT EXISTS (
-                    SELECT 1 FROM user_activities ua 
-                    WHERE ua.chat_id = u.chat_id 
-                      AND ua.user_id = u.user_id 
-                      AND ua.activity_date = $2 
-                      AND ua.activity_name = $3
-                  )
-                LIMIT 3
+                  AND u.current_activity = $3  -- 🎯 关键修复：移除 last_updated = $2
+                
+                ORDER BY total_time DESC
+                LIMIT 5
                 """,
                 chat_id,
                 today,
                 act,
             )
 
-            if rows or active_users:
+            if rows:
                 found_any_data = True
                 rank_text += f"📈 <code>{act}</code>：\n"
 
-                # 显示已完成的活动
+                # 🎯 优化：添加持续时间显示
                 for i, row in enumerate(rows, 1):
                     user_id = row["user_id"]
                     name = row["nickname"]
-                    time_sec = row["total_time"]
-                    time_str = MessageFormatter.format_time(int(time_sec))
-                    rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
+                    time_sec = row["total_time"] or 0
+                    status = row["status"]
 
-                # 显示进行中的活动（排在已完成活动后面）
-                start_idx = len(rows) + 1
-                for i, row in enumerate(active_users, start_idx):
-                    user_id = row["user_id"]
-                    name = row["nickname"] or f"用户{user_id}"
-                    rank_text += f"  <code>{i}.</code> {MessageFormatter.format_user_link(user_id, name)} - 🟡 进行中\n"
+                    if status == "completed" and time_sec > 0:
+                        time_str = MessageFormatter.format_time(int(time_sec))
+                        rank_text += f"  <code>{i}.</code> 🟢 {MessageFormatter.format_user_link(user_id, name)} - {time_str}\n"
+                    elif status == "active":
+                        # 🎯 添加进行中持续时间
+                        duration_info = ""
+                        if row["activity_start_time"]:
+                            try:
+                                start_time = datetime.fromisoformat(
+                                    row["activity_start_time"]
+                                )
+                                now = get_beijing_time()
+                                elapsed_seconds = int(
+                                    (now - start_time).total_seconds()
+                                )
+                                duration_info = f" ({MessageFormatter.format_time(elapsed_seconds)})"
+                            except Exception:
+                                duration_info = ""
+                        rank_text += f"  <code>{i}.</code> 🟡 {MessageFormatter.format_user_link(user_id, name)} - 进行中{duration_info}\n"
 
                 rank_text += "\n"
 
     if not found_any_data:
-        rank_text = (
-            "🏆 今日活动排行榜\n\n"
-            "📊 今日还没有活动记录\n"
-            "💪 开始第一个活动吧！\n\n"
-            "💡 提示：开始活动后会立即显示在这里"
-        )
+        rank_text = "🏆 今日活动排行榜\n\n暂时没有任何活动记录，大家快去打卡吧！"
 
     await message.answer(
         rank_text,
