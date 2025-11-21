@@ -4412,16 +4412,14 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
                 row.append(count)
                 row.append(time_formatted)
 
-            # 添加总计信息 - 使用正确的字段名
-            row.extend(
-                [
-                    user_stat.get("total_count", 0),
-                    db.format_time_for_csv(user_stat.get("total_time", 0)),
-                    user_stat.get("total_fines", 0),
-                    user_stat.get("total_overtime_count", 0),
-                    db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),
-                ]
-            )
+            # 🆕 关键修复：使用正确的字段名
+            row.extend([
+                user_stat.get("total_count", 0),
+                db.format_time_for_csv(user_stat.get("total_time", 0)),
+                user_stat.get("total_fines", 0),  # 🆕 罚款总额
+                user_stat.get("overtime_count", 0),  # 🆕 超时次数
+                db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),  # 🆕 总超时时间
+            ])
 
             writer.writerow(row)
 
@@ -4430,7 +4428,6 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
     except Exception as e:
         logger.error(f"❌ 月度导出优化版失败: {e}")
         return None
-
 
 async def export_and_push_csv(
     chat_id: int,
@@ -4480,11 +4477,16 @@ async def export_and_push_csv(
         # 正常导出：从日常表获取数据
         group_stats = await db.get_group_statistics(chat_id, target_date)
 
-    # 后续代码保持不变...
     for user_data in group_stats:
         total_count = user_data.get("total_activity_count", 0)
         total_time = user_data.get("total_accumulated_time", 0)
-        if total_count > 0 or (total_time and total_time > 0):
+        total_fines = user_data.get("total_fines", 0)  # 🆕 获取罚款总额
+        overtime_count = user_data.get("overtime_count", 0)  # 🆕 获取超时次数
+        total_overtime_time = user_data.get(
+            "total_overtime_time", 0
+        )  # 🆕 获取总超时时间
+
+        if total_count > 0 or total_time > 0 or total_fines > 0 or overtime_count > 0:
             has_data = True
 
         row = [user_data["user_id"], user_data.get("nickname", "未知用户")]
@@ -4496,19 +4498,20 @@ async def export_and_push_csv(
             row.append(count)
             row.append(time_str)
 
-        total_seconds_all = int(user_data.get("total_accumulated_time", 0) or 0)
+        total_seconds_all = int(total_time)
         total_time_str = MessageFormatter.format_time_for_csv(total_seconds_all)
 
-        overtime_seconds = int(user_data.get("total_overtime_time", 0) or 0)
+        overtime_seconds = int(total_overtime_time)
         overtime_str = MessageFormatter.format_time_for_csv(overtime_seconds)
 
+        # 🆕 关键修复：使用正确的字段值
         row.extend(
             [
                 total_count,
                 total_time_str,
-                user_data.get("total_fines", 0),
-                user_data.get("overtime_count", 0),
-                overtime_str,
+                total_fines,  # 🆕 使用正确的罚款总额
+                overtime_count,  # 🆕 使用正确的超时次数
+                overtime_str,  # 🆕 使用正确的总超时时间
             ]
         )
         writer.writerow(row)
