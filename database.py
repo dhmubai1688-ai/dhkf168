@@ -858,7 +858,8 @@ class PostgreSQLDatabase:
                         WHERE chat_id = $1 AND user_id = $2
                         AND (
                             total_activity_count > 0 
-                            OR total_accumulated_time > 0 
+                            OR total_accumulated_time > 0
+                            OR total_fines > 0  
                             OR overtime_count > 0
                             OR current_activity IS NOT NULL
                         )
