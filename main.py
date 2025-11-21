@@ -150,6 +150,21 @@ class UserLockManager:
             "last_cleanup": self._last_cleanup,
         }
 
+    async def cancel_all_timers(self):
+        """取消所有定时器"""
+        keys = list(self._timers.keys())
+        cancelled_count = 0
+
+        for key in keys:
+            try:
+                await self.cancel_timer(key)
+                cancelled_count += 1
+            except Exception as e:
+                logger.error(f"取消定时器 {key} 失败: {e}")
+
+        logger.info(f"✅ 已取消所有定时器: {cancelled_count}/{len(keys)} 个")
+        return cancelled_count
+
 
 # 全局用户锁管理器实例
 user_lock_manager = UserLockManager()
@@ -933,7 +948,7 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
             user_lock = get_user_lock(chat_id, uid)
             async with user_lock:
                 user_data = await db.get_user_cached(chat_id, uid)
-                
+
                 # 检查活动是否还在进行
                 if not user_data or user_data["current_activity"] != act:
                     logger.info(f"🛑 定时器停止: 活动已结束 {chat_id}-{uid}-{act}")
@@ -944,7 +959,7 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
                 elapsed = (get_beijing_time() - start_time).total_seconds()
                 remaining = limit * 60 - elapsed
                 nickname = user_data.get("nickname", str(uid))
-                
+
                 # 🎯 保存当前状态供后续使用
                 current_remaining = remaining
                 current_nickname = nickname
@@ -960,15 +975,20 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
                         f"💡 请及时回座，避免超时罚款"
                     )
                     back_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[[
-                            InlineKeyboardButton(
-                                text="👉 点击✅立即回座 👈",
-                                callback_data=f"quick_back:{chat_id}:{uid}",
-                            )
-                        ]]
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(
+                                    text="👉 点击✅立即回座 👈",
+                                    callback_data=f"quick_back:{chat_id}:{uid}",
+                                )
+                            ]
+                        ]
                     )
                     await bot.send_message(
-                        chat_id, warning_msg, parse_mode="HTML", reply_markup=back_keyboard
+                        chat_id,
+                        warning_msg,
+                        parse_mode="HTML",
+                        reply_markup=back_keyboard,
                     )
                     one_minute_warning_sent = True
                     logger.info(f"⚠️ 发送1分钟警告: {chat_id}-{uid}-{act}")
@@ -976,11 +996,11 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
             # 🎯 超时提醒
             if current_remaining <= 0:
                 overtime_minutes = int(-current_remaining // 60)
-                
+
                 # 发送前验证状态
                 if not await _validate_activity_still_active(chat_id, uid, act):
                     break
-                    
+
                 if overtime_minutes == 0 and not timeout_immediate_sent:
                     await _send_timeout_message(chat_id, uid, current_nickname, act, 0)
                     timeout_immediate_sent = True
@@ -991,10 +1011,14 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
                     timeout_5min_sent = True
                     last_reminder_minute = 5
 
-                elif (overtime_minutes >= 10 and 
-                      overtime_minutes % 10 == 0 and 
-                      overtime_minutes > last_reminder_minute):
-                    await _send_timeout_message(chat_id, uid, current_nickname, act, overtime_minutes)
+                elif (
+                    overtime_minutes >= 10
+                    and overtime_minutes % 10 == 0
+                    and overtime_minutes > last_reminder_minute
+                ):
+                    await _send_timeout_message(
+                        chat_id, uid, current_nickname, act, overtime_minutes
+                    )
                     last_reminder_minute = overtime_minutes
 
             # 🎯 检查超时强制回座（2小时）
@@ -1016,6 +1040,7 @@ async def _activity_timer_inner(chat_id: int, uid: int, act: str, limit: int):
     finally:
         logger.info(f"✅ 定时器结束: {chat_id}-{uid}-{act}")
 
+
 async def _validate_activity_still_active(chat_id: int, uid: int, act: str) -> bool:
     """快速验证活动是否仍在进行"""
     user_lock = get_user_lock(chat_id, uid)
@@ -1023,7 +1048,10 @@ async def _validate_activity_still_active(chat_id: int, uid: int, act: str) -> b
         user_data = await db.get_user_cached(chat_id, uid)
         return user_data and user_data["current_activity"] == act
 
-async def _send_timeout_message(chat_id: int, uid: int, nickname: str, act: str, minutes: int):
+
+async def _send_timeout_message(
+    chat_id: int, uid: int, nickname: str, act: str, minutes: int
+):
     """发送超时消息（统一处理）"""
     if minutes == 0:
         message = (
@@ -1039,22 +1067,27 @@ async def _send_timeout_message(chat_id: int, uid: int, nickname: str, act: str,
             f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>{minutes}</code> 分钟！\n"
             f"😤 请立即回座，避免罚款增加！"
         )
-    
+
     back_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(
-                text="👉 点击✅立即回座 👈",
-                callback_data=f"quick_back:{chat_id}:{uid}",
-            )
-        ]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👉 点击✅立即回座 👈",
+                    callback_data=f"quick_back:{chat_id}:{uid}",
+                )
+            ]
+        ]
     )
-    await bot.send_message(chat_id, message, parse_mode="HTML", reply_markup=back_keyboard)
+    await bot.send_message(
+        chat_id, message, parse_mode="HTML", reply_markup=back_keyboard
+    )
     logger.info(f"🚨 发送超时提醒: {chat_id}-{uid}-{act} {minutes}分钟")
+
 
 async def _handle_force_auto_back(chat_id: int, uid: int, act: str, user_data: dict):
     """处理强制自动回座"""
     logger.warning(f"🛑 强制回座: {chat_id}-{uid}-{act} 超时2小时")
-    
+
     nickname = user_data.get("nickname", str(uid))
     start_time = datetime.fromisoformat(user_data["activity_start_time"])
     elapsed = (get_beijing_time() - start_time).total_seconds()
@@ -1062,9 +1095,7 @@ async def _handle_force_auto_back(chat_id: int, uid: int, act: str, user_data: d
     fine_amount = await calculate_fine(act, overtime_minutes)
 
     # 完成活动
-    await db.complete_user_activity(
-        chat_id, uid, act, int(elapsed), fine_amount, True
-    )
+    await db.complete_user_activity(chat_id, uid, act, int(elapsed), fine_amount, True)
 
     # 发送回座消息
     auto_back_msg = (
@@ -1098,7 +1129,7 @@ async def _handle_force_auto_back(chat_id: int, uid: int, act: str, user_data: d
             f"💰 本次罚款：<code>{fine_amount}</code> 元\n"
             f"🔔 类型：系统自动回座（超时2小时强制）"
         )
-        
+
         # 确保 NotificationService 可用
         sent = await NotificationService.send_notification(chat_id, notif_text)
         if not sent:
@@ -4052,8 +4083,6 @@ async def show_rank(message: types.Message):
 
 
 # ==================== 回座功能优化 ====================
-
-
 async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
     """线程安全的回座逻辑（防重入 + 超时 + 日志优化）"""
     start_time = time.time()
@@ -5444,13 +5473,6 @@ async def on_startup():
 async def on_shutdown():
     """关闭时执行 - 优化版本"""
     logger.info("🛑 机器人正在关闭...")
-
-    async def cancel_all_timers(self):
-        """取消所有定时器"""
-        keys = list(self._timers.keys())
-        for key in keys:
-            await self.cancel_timer(key)
-        logger.info(f"✅ 已取消所有定时器: {len(keys)} 个")
 
     await timer_manager.cancel_all_timers()
 
