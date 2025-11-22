@@ -1227,14 +1227,38 @@ class PostgreSQLDatabase:
     async def has_work_record_today(
         self, chat_id: int, user_id: int, checkin_type: str
     ) -> bool:
-        """检查今天是否有指定类型的上下班记录"""
-        today = self.get_beijing_date()
+        """
+        🆕 修复版：检查在当前工作周期内是否有指定类型的上下班记录
+        考虑跨天情况，基于管理员设定的重置时间
+        """
+        now = self.get_beijing_time()
+    
+        # 获取群组重置时间设置
+        group_data = await self.get_group_cached(chat_id)
+        if not group_data:
+            # 如果群组不存在，使用默认重置时间
+            reset_hour = Config.DAILY_RESET_HOUR
+            reset_minute = Config.DAILY_RESET_MINUTE
+        else:
+            reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+            reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+    
+        # 计算当前重置周期开始时间（与 reset_daily_data_if_needed 逻辑一致）
+        reset_time_today = now.replace(hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
+    
+        if now < reset_time_today:
+            # 当前时间还没到今天的重置点 → 当前周期起点是昨天的重置时间
+            current_period_start = reset_time_today - timedelta(days=1)
+        else:
+            # 已经过了今天的重置点 → 当前周期起点为今天的重置时间
+            current_period_start = reset_time_today
+    
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT 1 FROM work_records WHERE chat_id = $1 AND user_id = $2 AND record_date = $3 AND checkin_type = $4",
+                "SELECT 1 FROM work_records WHERE chat_id = $1 AND user_id = $2 AND record_date >= $3 AND checkin_type = $4",
                 chat_id,
                 user_id,
-                today,
+                current_period_start.date(),  # 🆕 改为 >= 当前周期开始日期
                 checkin_type,
             )
             return row is not None
