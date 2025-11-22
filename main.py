@@ -478,7 +478,7 @@ class MessageFormatter:
 
         for act, count in activity_counts.items():
             if count > 0:
-                message += f"🔹 今日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
+                message += f"🔹 本日{MessageFormatter.format_copyable_text(act)}次数：{MessageFormatter.format_copyable_text(str(count))} 次\n"
 
         message += f"\n📊 今日总活动次数：{MessageFormatter.format_copyable_text(str(total_count))} 次"
 
@@ -4310,8 +4310,6 @@ async def export_data(message: types.Message):
 
 
 # ==================== 从月度表获取统计数据 ====================
-
-
 async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[Dict]:
     """从月度统计表获取群组统计数据（用于重置后导出）"""
     try:
@@ -4336,10 +4334,10 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             user_data = {
                 "user_id": stat["user_id"],
                 "nickname": stat.get("nickname", f"用户{stat['user_id']}"),
-                "total_accumulated_time": stat.get("total_time", 0),
-                "total_activity_count": stat.get("total_count", 0),
+                "total_accumulated_time": stat.get("total_accumulated_time", 0),  # ✅ 修正
+                "total_activity_count": stat.get("total_activity_count", 0),      # ✅ 修正
                 "total_fines": stat.get("total_fines", 0),
-                "overtime_count": stat.get("total_overtime_count", 0),
+                "overtime_count": stat.get("overtime_count", 0),                  # ✅ 修正
                 "total_overtime_time": stat.get("total_overtime_time", 0),
                 "activities": stat.get("activities", {}),
             }
@@ -4355,10 +4353,9 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         logger.error(f"❌ 从月度表获取数据失败: {e}")
         return []
 
-
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
-    """优化版月度数据导出，每个用户一行，活动横向排列"""
+    """优化版月度数据导出 - 修复字段映射"""
     try:
         # 获取活动配置
         activity_limits = await db.get_activity_limits_cached()
@@ -4375,9 +4372,15 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
             headers.extend([f"{act}次数", f"{act}总时长"])
 
         # 添加总计列
-        headers.extend(
-            ["活动次数总计", "活动用时总计", "罚款总金额", "超时次数", "总超时时间"]
-        )
+        headers.extend([
+            "活动次数总计", 
+            "活动用时总计", 
+            "罚款总金额", 
+            "超时次数", 
+            "总超时时间",
+            "工作天数",      
+            "工作时长"       
+        ])
 
         writer.writerow(headers)
 
@@ -4391,27 +4394,26 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         for user_stat in monthly_stats:
             row = [user_stat["user_id"], user_stat.get("nickname", "未知用户")]
 
-            # 添加每个活动的次数和时长
+            # 🆕 修复：确保活动数据完整
             for act in activity_names:
-                activity_info = user_stat["activities"].get(act, {})
+                activity_info = user_stat.get("activities", {}).get(act, {})
                 count = activity_info.get("count", 0)
                 time_seconds = activity_info.get("time", 0)
-                # 使用数据库的格式化方法
                 time_formatted = db.format_time_for_csv(time_seconds)
-
+                
                 row.append(count)
                 row.append(time_formatted)
 
-            # 添加总计信息 - 使用正确的字段名
-            row.extend(
-                [
-                    user_stat.get("total_count", 0),
-                    db.format_time_for_csv(user_stat.get("total_time", 0)),
-                    user_stat.get("total_fines", 0),
-                    user_stat.get("total_overtime_count", 0),
-                    db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),
-                ]
-            )
+            # 🆕 修复：使用正确的字段名映射
+            row.extend([
+                user_stat.get("total_activity_count", 0),           # 活动次数总计
+                db.format_time_for_csv(user_stat.get("total_accumulated_time", 0)),  # 活动用时总计
+                user_stat.get("total_fines", 0),                    # 罚款总金额
+                user_stat.get("overtime_count", 0),                 # 超时次数
+                db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),     # 总超时时间
+                user_stat.get("work_days", 0),                      # 工作天数
+                db.format_time_for_csv(user_stat.get("work_hours", 0))               # 工作时长
+            ])
 
             writer.writerow(row)
 
@@ -4420,7 +4422,6 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
     except Exception as e:
         logger.error(f"❌ 月度导出优化版失败: {e}")
         return None
-
 
 async def export_and_push_csv(
     chat_id: int,
@@ -5960,4 +5961,3 @@ async def preload_frequent_data():
 #     except Exception as e:
 #         logger.error(f"💥 机器人异常退出: {e}")
 #         sys.exit(1)
-
