@@ -590,7 +590,7 @@ class PostgreSQLDatabase:
         fine_amount: int = 0,
         is_overtime: bool = False,
     ):
-        """完成用户活动 - 同时更新月度统计"""
+        """完成用户活动 - 完整更新月度统计表"""
         today = self.get_beijing_date()
         statistic_date = today.replace(day=1)  # 月度统计使用月初日期
 
@@ -632,7 +632,11 @@ class PostgreSQLDatabase:
                     elapsed_time,
                 )
 
-                # 🆕 新增：更新 monthly_statistics 表
+                # =====================================================
+                # 🆕 关键修改：完整更新月度统计表的所有字段
+                # =====================================================
+
+                # 1. 更新普通活动记录
                 await conn.execute(
                     """
                     INSERT INTO monthly_statistics 
@@ -650,6 +654,62 @@ class PostgreSQLDatabase:
                     activity,
                     elapsed_time,
                 )
+
+                # 2. 🆕 更新罚款总额记录
+                if fine_amount > 0:
+                    await conn.execute(
+                        """
+                        INSERT INTO monthly_statistics 
+                        (chat_id, user_id, statistic_date, activity_name, accumulated_time)
+                        VALUES ($1, $2, $3, 'total_fines', $4)
+                        ON CONFLICT (chat_id, user_id, statistic_date, activity_name) 
+                        DO UPDATE SET 
+                            accumulated_time = monthly_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        chat_id,
+                        user_id,
+                        statistic_date,
+                        fine_amount,
+                    )
+
+                # 3. 🆕 更新超时统计记录（分开存储）
+                if is_overtime:
+                    time_limit = await self.get_activity_time_limit(activity)
+                    overtime_seconds = max(0, elapsed_time - (time_limit * 60))
+
+                    # 3.1 更新超时次数
+                    await conn.execute(
+                        """
+                        INSERT INTO monthly_statistics 
+                        (chat_id, user_id, statistic_date, activity_name, activity_count)
+                        VALUES ($1, $2, $3, 'overtime_count', 1)
+                        ON CONFLICT (chat_id, user_id, statistic_date, activity_name) 
+                        DO UPDATE SET 
+                            activity_count = monthly_statistics.activity_count + 1,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        chat_id,
+                        user_id,
+                        statistic_date,
+                    )
+
+                    # 3.2 更新超时时间
+                    await conn.execute(
+                        """
+                        INSERT INTO monthly_statistics 
+                        (chat_id, user_id, statistic_date, activity_name, accumulated_time)
+                        VALUES ($1, $2, $3, 'overtime_time', $4)
+                        ON CONFLICT (chat_id, user_id, statistic_date, activity_name) 
+                        DO UPDATE SET 
+                            accumulated_time = monthly_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        chat_id,
+                        user_id,
+                        statistic_date,
+                        overtime_seconds,
+                    )
 
                 # 原有的用户统计更新逻辑保持不变
                 update_fields = [
@@ -1673,11 +1733,12 @@ class PostgreSQLDatabase:
             return result
 
     # ========== 月度统计 ==========
-
     async def get_monthly_statistics(
         self, chat_id: int, year: int = None, month: int = None
     ) -> List[Dict]:
-        """获取月度统计信息 - 修复版 + 加入上下班统计"""
+        """最终版：完全基于月度表统计（昵称来自 users，不依赖 users 活动字段）"""
+
+        # 自动获取年月
         if year is None or month is None:
             today = self.get_beijing_time()
             year = today.year
@@ -1686,104 +1747,181 @@ class PostgreSQLDatabase:
         statistic_date = date(year, month, 1)
 
         async with self.pool.acquire() as conn:
-            # ⬇ 保留你原先的完整统计查询（不动）
+
+            # =====================================================
+            # 📌 1. 月度汇总（完全来自 monthly_statistics）
+            # =====================================================
             monthly_stats = await conn.fetch(
                 """
-                SELECT 
+                SELECT
                     ms.user_id,
+
+                    -- 昵称（安全：昵称不会被 reset）
                     u.nickname,
-                    -- 活动总时长（排除系统记录）
-                    SUM(CASE WHEN ms.activity_name NOT IN ('work_days', 'total_fines', 'work_hours') THEN ms.accumulated_time ELSE 0 END) as total_time,
-                    -- 活动总次数
-                    SUM(CASE WHEN ms.activity_name NOT IN ('work_days', 'total_fines', 'work_hours') THEN ms.activity_count ELSE 0 END) as total_count,
-                    -- 工作天数
-                    MAX(CASE WHEN ms.activity_name = 'work_days' THEN ms.work_days ELSE 0 END) as work_days,
-                    -- 工作时长
-                    MAX(CASE WHEN ms.activity_name = 'work_hours' THEN ms.accumulated_time ELSE 0 END) as work_hours,
-                    -- 罚款总额
-                    MAX(CASE WHEN ms.activity_name = 'total_fines' THEN ms.accumulated_time ELSE 0 END) as total_fines,
-                    -- 超时统计（从users表获取）
-                    COALESCE(u.overtime_count, 0) as overtime_count,
-                    COALESCE(u.total_overtime_time, 0) as total_overtime_time,
-                    -- 用户累计罚款兜底
-                    COALESCE(u.total_fines, 0) as user_total_fines
+
+                    -- 活动总时长（普通活动）
+                    COALESCE(SUM(
+                        CASE 
+                            WHEN ms.activity_name NOT IN (
+                                'work_days', 'work_hours', 
+                                'total_fines', 'overtime_count', 'overtime_time'
+                            )
+                            THEN ms.accumulated_time
+                            ELSE 0 
+                        END
+                    ), 0) AS total_accumulated_time,
+
+                    -- 活动总次数（普通活动）
+                    COALESCE(SUM(
+                        CASE 
+                            WHEN ms.activity_name NOT IN (
+                                'work_days', 'work_hours', 
+                                'total_fines', 'overtime_count', 'overtime_time'
+                            )
+                            THEN ms.activity_count
+                            ELSE 0 
+                        END
+                    ), 0) AS total_activity_count,
+
+                    -- 🎯 罚款
+                    COALESCE(SUM(
+                        CASE WHEN ms.activity_name = 'total_fines'
+                        THEN ms.accumulated_time ELSE 0 END
+                    ), 0) AS total_fines,
+
+                    -- 🎯 超时次数
+                    COALESCE(SUM(
+                        CASE WHEN ms.activity_name = 'overtime_count'
+                        THEN ms.activity_count ELSE 0 END
+                    ), 0) AS overtime_count,
+
+                    -- 🎯 超时时间
+                    COALESCE(SUM(
+                        CASE WHEN ms.activity_name = 'overtime_time'
+                        THEN ms.accumulated_time ELSE 0 END
+                    ), 0) AS total_overtime_time,
+
+                    -- 🎯 工作天数
+                    COALESCE(SUM(
+                        CASE WHEN ms.activity_name = 'work_days'
+                        THEN ms.activity_count ELSE 0 END
+                    ), 0) AS work_days,
+
+                    -- 🎯 工作时长
+                    COALESCE(SUM(
+                        CASE WHEN ms.activity_name = 'work_hours'
+                        THEN ms.accumulated_time ELSE 0 END
+                    ), 0) AS work_hours
+
                 FROM monthly_statistics ms
-                JOIN users u ON ms.chat_id = u.chat_id AND ms.user_id = u.user_id
+                JOIN users u ON u.chat_id = ms.chat_id AND u.user_id = ms.user_id
                 WHERE ms.chat_id = $1 AND ms.statistic_date = $2
-                GROUP BY ms.user_id, u.nickname, u.overtime_count, u.total_overtime_time, u.total_fines
-                ORDER BY total_time DESC
+                GROUP BY ms.user_id, u.nickname
+                ORDER BY total_accumulated_time DESC
                 """,
                 chat_id,
                 statistic_date,
             )
 
             result = []
-            for stat in monthly_stats:
-                user_data = dict(stat)
 
-                # ⬇ 兼容原有罚款
-                if user_data["total_fines"] == 0:
-                    user_data["total_fines"] = user_data["user_total_fines"]
+            # 提取用户ID列表
+            user_ids = [row["user_id"] for row in monthly_stats]
 
-                # 格式化
-                user_data["total_time_formatted"] = self.format_seconds_to_hms(
-                    user_data["total_time"] or 0
-                )
-                user_data["work_hours_formatted"] = self.format_seconds_to_hms(
-                    user_data["work_hours"] or 0
-                )
-                user_data["total_overtime_time_formatted"] = self.format_seconds_to_hms(
-                    user_data["total_overtime_time"] or 0
-                )
-
-                # ⬇ 获取活动细项（保持原有逻辑）
-                activity_details = await conn.fetch(
+            # =====================================================
+            # 📌 2. 批量获取活动详情（普通活动）
+            # =====================================================
+            activity_map = {}
+            if user_ids:
+                activity_rows = await conn.fetch(
                     """
                     SELECT 
+                        user_id,
                         activity_name,
                         activity_count,
                         accumulated_time
                     FROM monthly_statistics
-                    WHERE chat_id = $1 AND user_id = $2 AND statistic_date = $3
-                        AND activity_name NOT IN ('work_days', 'total_fines', 'work_hours')
+                    WHERE chat_id = $1 AND user_id = ANY($2) AND statistic_date = $3
+                    AND activity_name NOT IN (
+                        'work_days', 'work_hours', 
+                        'total_fines', 'overtime_count', 'overtime_time'
+                    )
+                    ORDER BY user_id, activity_name
                     """,
                     chat_id,
-                    user_data["user_id"],
+                    user_ids,
                     statistic_date,
                 )
-
-                user_data["activities"] = {}
-                for row in activity_details:
-                    activity_time = row["accumulated_time"] or 0
-                    user_data["activities"][row["activity_name"]] = {
+                for row in activity_rows:
+                    uid = row["user_id"]
+                    activity_map.setdefault(uid, {})
+                    seconds = row["accumulated_time"] or 0
+                    activity_map[uid][row["activity_name"]] = {
                         "count": row["activity_count"] or 0,
-                        "time": activity_time,
-                        "time_formatted": self.format_seconds_to_hms(activity_time),
+                        "time": seconds,
+                        "time_formatted": self.format_seconds_to_hms(seconds),
                     }
 
-                # 🆕 ⬇⬇ 新增：上下班统计（第二版中的功能）
-                work_stats = await conn.fetch(
+            # =====================================================
+            # 📌 3. 批量上下班统计（work_records）
+            # =====================================================
+            work_stats_map = {}
+            if user_ids:
+                work_rows = await conn.fetch(
                     """
                     SELECT 
+                        user_id,
                         checkin_type,
                         COUNT(*) AS count,
                         SUM(fine_amount) AS fines
-                    FROM work_records 
-                    WHERE chat_id = $1 AND user_id = $2
-                        AND record_date >= $3 AND record_date < $3 + INTERVAL '1 month'
-                    GROUP BY checkin_type
+                    FROM work_records
+                    WHERE chat_id = $1 AND user_id = ANY($2)
+                    AND record_date >= $3 
+                    AND record_date < $3 + INTERVAL '1 month'
+                    GROUP BY user_id, checkin_type
                     """,
                     chat_id,
-                    user_data["user_id"],
+                    user_ids,
                     statistic_date,
                 )
-
-                user_data["work_stats"] = {}
-                for row in work_stats:
-                    user_data["work_stats"][row["checkin_type"]] = {
+                for row in work_rows:
+                    uid = row["user_id"]
+                    work_stats_map.setdefault(uid, {})
+                    work_stats_map[uid][row["checkin_type"]] = {
                         "count": row["count"],
                         "fines": row["fines"] or 0,
                     }
+
+            # =====================================================
+            # 📌 4. 合成最终输出
+            # =====================================================
+            for row in monthly_stats:
+                uid = row["user_id"]
+
+                user_data = {
+                    "user_id": uid,
+                    "nickname": row["nickname"],
+                    "total_accumulated_time": row["total_accumulated_time"],
+                    "total_activity_count": row["total_activity_count"],
+                    "total_fines": row["total_fines"],
+                    "overtime_count": row["overtime_count"],
+                    "total_overtime_time": row["total_overtime_time"],
+                    "work_days": row["work_days"],
+                    "work_hours": row["work_hours"],
+                    "activities": activity_map.get(uid, {}),
+                    "work_stats": work_stats_map.get(uid, {}),
+                }
+
+                # 格式化时间
+                user_data["total_accumulated_time_formatted"] = (
+                    self.format_seconds_to_hms(user_data["total_accumulated_time"])
+                )
+                user_data["total_overtime_time_formatted"] = self.format_seconds_to_hms(
+                    user_data["total_overtime_time"]
+                )
+                user_data["work_hours_formatted"] = self.format_seconds_to_hms(
+                    user_data["work_hours"]
+                )
 
                 result.append(user_data)
 
