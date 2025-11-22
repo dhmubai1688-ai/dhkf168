@@ -4310,6 +4310,8 @@ async def export_data(message: types.Message):
 
 
 # ==================== 从月度表获取统计数据 ====================
+
+
 async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[Dict]:
     """从月度统计表获取群组统计数据（用于重置后导出）"""
     try:
@@ -4331,14 +4333,23 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
 
         result = []
         for stat in monthly_stats:
+            # 🆕 调试日志：检查工作相关字段
+            logger.debug(
+                f"📊 用户 {stat['user_id']} 工作数据: "
+                f"工作天数={stat.get('work_days', 0)}, "
+                f"工作时长={stat.get('work_hours', 0)}秒"
+            )
+
             user_data = {
                 "user_id": stat["user_id"],
                 "nickname": stat.get("nickname", f"用户{stat['user_id']}"),
-                "total_accumulated_time": stat.get("total_accumulated_time", 0),  # ✅ 修正
-                "total_activity_count": stat.get("total_activity_count", 0),      # ✅ 修正
+                "total_accumulated_time": stat.get("total_accumulated_time", 0),
+                "total_activity_count": stat.get("total_activity_count", 0),
                 "total_fines": stat.get("total_fines", 0),
-                "overtime_count": stat.get("overtime_count", 0),                  # ✅ 修正
+                "overtime_count": stat.get("overtime_count", 0),
                 "total_overtime_time": stat.get("total_overtime_time", 0),
+                "work_days": stat.get("work_days", 0),  # 🆕 新增工作天数
+                "work_hours": stat.get("work_hours", 0),  # 🆕 新增工作时长
                 "activities": stat.get("activities", {}),
             }
 
@@ -4352,6 +4363,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
     except Exception as e:
         logger.error(f"❌ 从月度表获取数据失败: {e}")
         return []
+
 
 # ==================== CSV导出推送功能优化 ====================
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
@@ -4394,7 +4406,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         for user_stat in monthly_stats:
             row = [user_stat["user_id"], user_stat.get("nickname", "未知用户")]
 
-            # 🆕 修复：确保活动数据完整
+            # 确保活动数据完整
             for act in activity_names:
                 activity_info = user_stat.get("activities", {}).get(act, {})
                 count = activity_info.get("count", 0)
@@ -4404,7 +4416,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
                 row.append(count)
                 row.append(time_formatted)
 
-            # 🆕 修复：使用正确的字段名映射
+            # 使用正确的字段名映射
             row.extend([
                 user_stat.get("total_activity_count", 0),           # 活动次数总计
                 db.format_time_for_csv(user_stat.get("total_accumulated_time", 0)),  # 活动用时总计
@@ -4422,6 +4434,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
     except Exception as e:
         logger.error(f"❌ 月度导出优化版失败: {e}")
         return None
+
 
 async def export_and_push_csv(
     chat_id: int,
