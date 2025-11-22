@@ -4408,7 +4408,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         for user_stat in monthly_stats:
             row = [user_stat["user_id"], user_stat.get("nickname", "未知用户")]
 
-            # 确保活动数据完整
+            # 🆕 修复：确保活动数据完整
             for act in activity_names:
                 activity_info = user_stat.get("activities", {}).get(act, {})
                 count = activity_info.get("count", 0)
@@ -4418,7 +4418,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
                 row.append(count)
                 row.append(time_formatted)
 
-            # 使用正确的字段名映射
+            # 🆕 修复：使用正确的字段名映射
             row.extend(
                 [
                     user_stat.get("total_activity_count", 0),  # 活动次数总计
