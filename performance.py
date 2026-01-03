@@ -356,21 +356,6 @@ def handle_telegram_errors(func):
     return async_wrapper
 
 
-def handle_database_errors(func):
-    """数据库错误处理装饰器"""
-
-    @wraps(func)
-    async def async_wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            logger.error(f"❌ 数据库操作失败 {func.__name__}: {e}")
-            # 这里可以根据需要添加更具体的数据库异常处理
-            raise
-
-    return async_wrapper
-
-
 # 全局实例
 performance_monitor = PerformanceMonitor()
 retry_manager = RetryManager(max_retries=3, base_delay=1.0)
