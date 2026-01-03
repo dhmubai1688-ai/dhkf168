@@ -50,7 +50,6 @@ from utils import (
     calculate_cross_day_time_diff,
     is_valid_checkin_time,
     rate_limit,
-    send_overtime_notification_async_with_data
 )
 
 from bot_manager import bot_manager
@@ -1260,6 +1259,100 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
         active_back_processing.pop(key, None)
         duration = round(time.time() - start_time, 2)
         logger.info(f"✅ 回座结束 chat_id={chat_id}, uid={uid}，耗时 {duration}s")
+
+# ========== 超时通知辅助函数 ==========
+async def send_overtime_notification_async_with_data(notification_data: dict):
+    """使用保存的数据发送超时通知 - 确保在数据库更新前保存数据"""
+    try:
+        chat_id = notification_data["chat_id"]
+        uid = notification_data["uid"]
+        act = notification_data["act"]
+        nickname = notification_data["nickname"]
+        start_time_dt = notification_data["start_time_dt"]
+        elapsed = notification_data["elapsed"]
+        is_overtime = notification_data["is_overtime"]
+        overtime_seconds = notification_data["overtime_seconds"]
+        fine_amount = notification_data["fine_amount"]
+        now = notification_data["now"]
+        time_limit_minutes = notification_data["time_limit_minutes"]
+        
+        logger.info(f"🔔 开始发送超时通知: {chat_id}-{uid} - {act}")
+        
+        # 使用全局 bot 实例
+        current_bot = None
+        
+        # 方案1：从全局变量获取
+        if 'bot' in globals():
+            current_bot = globals()['bot']
+            logger.debug("✅ 从全局变量获取 bot")
+        
+        # 方案2：从 notification_service 获取
+        if not current_bot and notification_service and notification_service.bot:
+            current_bot = notification_service.bot
+            logger.debug("✅ 从 notification_service 获取 bot")
+        
+        # 方案3：从 bot_manager 获取
+        if not current_bot and 'bot_manager' in globals():
+            bot_manager_instance = globals().get('bot_manager')
+            if bot_manager_instance and hasattr(bot_manager_instance, 'bot'):
+                current_bot = bot_manager_instance.bot
+                logger.debug("✅ 从 bot_manager 获取 bot")
+        
+        if not current_bot:
+            logger.error("❌ 无法获取 bot 实例，跳过通知发送")
+            return
+        
+        # 获取群组标题
+        chat_title = f"群组{chat_id}"
+        try:
+            chat_info = await current_bot.get_chat(chat_id)
+            chat_title = chat_info.title or chat_title
+        except Exception as e:
+            logger.warning(f"获取群组标题失败: {e}")
+        
+        # 构建通知文本
+        notif_text = (
+            f"🚨 <b>超时回座通知</b>\n"
+            f"🏢 群组：<code>{chat_title}</code>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
+            f"📝 活动：<code>{act}</code>\n"
+            f"⏰ 开始时间：<code>{start_time_dt.strftime('%m/%d %H:%M:%S')}</code>\n"
+            f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
+            f"⏱️ 总时长：<code>{MessageFormatter.format_time(int(elapsed))}</code>\n"
+            f"⏰ 限定时长：<code>{time_limit_minutes}</code> 分钟\n"
+            f"⚠️ 超时时长：<code>{MessageFormatter.format_time(int(overtime_seconds))}</code>\n"
+            f"💰 罚款金额：<code>{fine_amount}</code> 元"
+        )
+        
+        # 发送到当前群组
+        try:
+            await current_bot.send_message(chat_id, notif_text, parse_mode="HTML")
+            logger.info(f"✅ 超时通知已发送到群组 {chat_id}")
+        except Exception as e:
+            logger.error(f"❌ 发送到群组失败: {e}")
+        
+        # 推送到绑定频道/群组
+        try:
+            if notification_service:
+                success = await notification_service.send_notification(
+                    chat_id, 
+                    notif_text, 
+                    notification_type="overtime"
+                )
+                if success:
+                    logger.info(f"✅ 超时通知已推送到绑定频道/群组")
+                else:
+                    logger.warning(f"⚠️ 推送到绑定频道/群组失败")
+            else:
+                logger.warning("⚠️ notification_service 不可用")
+        except Exception as e:
+            logger.error(f"❌ 推送通知失败: {e}")
+        
+    except Exception as e:
+        logger.error(f"❌ 超时通知发送失败: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
 
 
 # 🎯 【新增】异步发送超时通知函数
