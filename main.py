@@ -2910,73 +2910,101 @@ async def cmd_setworkfine(message: types.Message):
 @admin_required
 @rate_limit(rate=5, per=60)
 async def cmd_showsettings(message: types.Message):
-    """显示目前的设置 - 优化版本"""
+    """显示目前的设置 - 修复排序与格式化崩溃版本"""
     chat_id = message.chat.id
-    await db.init_group(chat_id)
-    group_data = await db.get_group_cached(chat_id)
+    
+    try:
+        # 1. 数据初始化与获取
+        await db.init_group(chat_id)
+        group_data = await db.get_group_cached(chat_id)
 
-    if group_data and not isinstance(group_data, dict):
-        group_data = dict(group_data)
+        if group_data and not isinstance(group_data, dict):
+            group_data = dict(group_data)
 
-    activity_limits = await db.get_activity_limits_cached()
-    fine_rates = await db.get_fine_rates()
-    work_fine_rates = await db.get_work_fine_rates()
+        activity_limits = await db.get_activity_limits_cached()
+        fine_rates = await db.get_fine_rates()
+        work_fine_rates = await db.get_work_fine_rates()
 
-    # 生成输出文本
-    text = f"🔧 当前群设置（当前群ID {chat_id}）\n\n"
+        # 🆕 内部辅助排序函数：防止 int('max') 崩溃
+        def safe_sort_key(item):
+            """
+            处理 key 排序：支持 '10', '10min', 'max' 等格式
+            """
+            k = str(item[0]).lower().replace("min", "").strip()
+            try:
+                return int(k)
+            except (ValueError, TypeError):
+                return 999999  # 如果是 'max'，让它排在最后
 
-    # 基本设置
-    text += "📋 基本设置：\n"
-    text += f"• 绑定频道ID: <code>{group_data.get('channel_id', '未设置')}</code>\n"
-    text += f"• 通知群组ID: <code>{group_data.get('notification_group_id', '未设置')}</code>\n\n"
-    text += "⏰ 重置设置：\n"
-    text += f"• 每日重置时间: <code>{group_data.get('reset_hour', 0):02d}:{group_data.get('reset_minute', 0):02d}</code>\n"
-    text += f"• 上班时间: <code>{group_data.get('work_start_time', '09:00')}</code>\n"
-    text += f"• 下班时间: <code>{group_data.get('work_end_time', '18:00')}</code>\n\n"
+        # 2. 生成输出文本
+        text = f"🔧 <b>当前群设置</b>（ID: <code>{chat_id}</code>）\n"
+        text += "━━━━━━━━━━━━━━\n"
 
-    # 活动设置
-    text += "🎯 活动设置：\n"
-    for act, v in activity_limits.items():
-        text += f"• <code>{act}</code>：次数上限 <code>{v['max_times']}</code>，时间限制 <code>{v['time_limit']}</code> 分钟\n"
+        # 基本设置
+        text += "📋 <b>基本设置：</b>\n"
+        text += f"• 绑定频道: <code>{group_data.get('channel_id', '未设置')}</code>\n"
+        text += f"• 通知群组: <code>{group_data.get('notification_group_id', '未设置')}</code>\n"
+        text += f"• 每日重置: <code>{group_data.get('reset_hour', 0):02d}:{group_data.get('reset_minute', 0):02d}</code>\n"
+        text += f"• 上班时间: <code>{group_data.get('work_start_time', '09:00')}</code>\n"
+        text += f"• 下班时间: <code>{group_data.get('work_end_time', '18:00')}</code>\n\n"
 
-    # 活动罚款设置
-    text += "\n💰 活动罚款分段：\n"
-    has_fine_settings = False
-    for act, fr in fine_rates.items():
-        if fr:
-            has_fine_settings = True
-            sorted_fines = sorted(
-                fr.items(), key=lambda x: int(x[0].replace("min", ""))
-            )
-            fines_text = " | ".join([f"{k}:{v}元" for k, v in sorted_fines])
-            text += f"• <code>{act}</code>：{fines_text}\n"
+        # 活动设置
+        text += "🎯 <b>活动次数/时间限制：</b>\n"
+        if activity_limits:
+            for act, v in activity_limits.items():
+                text += f"• <code>{act}</code>：上限 <code>{v.get('max_times', 0)}</code> 次，限时 <code>{v.get('time_limit', 0)}</code> 分钟\n"
+        else:
+            text += "• 暂无活动限制\n"
 
-    if not has_fine_settings:
-        text += "• 暂无活动罚款设置\n"
+        # 活动罚款设置
+        text += "\n💰 <b>活动超时罚款：</b>\n"
+        has_fine_settings = False
+        for act, fr in fine_rates.items():
+            if fr:
+                has_fine_settings = True
+                # 使用安全排序修复崩溃
+                sorted_fines = sorted(fr.items(), key=safe_sort_key)
+                fines_text = " | ".join([f"{str(k).replace('min','')}: {v}元" for k, v in sorted_fines])
+                text += f"• <code>{act}</code>：{fines_text}\n"
 
-    # 上下班罚款设置
-    text += "\n⏰ 上下班罚款设置：\n"
-    start_fines = work_fine_rates.get("work_start", {})
-    if start_fines:
-        sorted_start = sorted(start_fines.items(), key=lambda x: int(x[0]))
-        start_text = " | ".join([f"{k}分:{v}元" for k, v in sorted_start])
-        text += f"• 上班迟到：{start_text}\n"
-    else:
-        text += "• 上班迟到：未设置\n"
+        if not has_fine_settings:
+            text += "• 暂无活动罚款设置\n"
 
-    end_fines = work_fine_rates.get("work_end", {})
-    if end_fines:
-        sorted_end = sorted(end_fines.items(), key=lambda x: int(x[0]))
-        end_text = " | ".join([f"{k}分:{v}元" for k, v in sorted_end])
-        text += f"• 下班早退：{end_text}\n"
-    else:
-        text += "• 下班早退：未设置\n"
+        # 上下班罚款设置
+        text += "\n⏰ <b>上下班罚款设置：</b>\n"
+        
+        # 上班排序修复
+        start_fines = work_fine_rates.get("work_start", {})
+        if start_fines:
+            sorted_start = sorted(start_fines.items(), key=safe_sort_key)
+            start_text = " | ".join([f"{k}分: {v}元" for k, v in sorted_start])
+            text += f"• 上班迟到：{start_text}\n"
+        else:
+            text += "• 上班迟到：未设置\n"
 
-    await message.answer(
-        text,
-        reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
-        parse_mode="HTML",
-    )
+        # 下班排序修复
+        end_fines = work_fine_rates.get("work_end", {})
+        if end_fines:
+            sorted_end = sorted(end_fines.items(), key=safe_sort_key)
+            end_text = " | ".join([f"{k}分: {v}元" for k, v in sorted_end])
+            text += f"• 下班早退：{end_text}\n"
+        else:
+            text += "• 下班早退：未设置\n"
+
+        text += "━━━━━━━━━━━━━━"
+
+        await message.answer(
+            text,
+            reply_markup=await get_main_keyboard(chat_id=chat_id, show_admin=True),
+            parse_mode="HTML",
+        )
+        logger.info(f"✅ 设置面板已展示给管理员 {message.from_user.id}")
+
+    except Exception as e:
+        logger.error(f"❌ 显示设置失败: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await message.answer("⚠️ <b>面板加载失败</b>\n原因：设置项中存在非标准字符或数据格式不兼容，请联系技术检查后台配置。")
 
 
 # ========== 查看工作时间命令 =========
