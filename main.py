@@ -3680,76 +3680,95 @@ async def memory_cleanup_task():
 
 
 async def health_monitoring_task():
-    """健康监控任务：包含内存清理、超时强制回座及推送"""
+    """
+    健康监控任务：修复时间解析报错，增强启动恢复能力
+    """
     logger.info("🚀 超时监控与内存健康任务已启动")
+
+    is_first_run = True
+
     while True:
         try:
-            # 1. 原有的内存检查逻辑
+            # 只有在非第一次运行时才等待
+            if not is_first_run:
+                await asyncio.sleep(60)
+
+            # 1. 内存检查
             if not performance_optimizer.memory_usage_ok():
                 logger.warning("内存使用过高，执行紧急清理")
                 await performance_optimizer.memory_cleanup()
 
-            # 2. 🆕 新增：自动超时检查 (2小时强制回座)
+            # 2. 超时检查
             now = get_beijing_time()
             active_users = await db.get_all_active_users()
 
             for user in active_users:
-                if not user["activity_start_time"]:
+                raw_time = user.get("activity_start_time")
+                if not raw_time:
                     continue
 
-                # 解析开始时间并计算已持续秒数
                 try:
-                    start_time = datetime.fromisoformat(user["activity_start_time"])
-                    # 如果存储的是不带时区的，确保对齐
+                    # --- 🆕 核心修复：健壮的时间解析逻辑 ---
+                    if isinstance(raw_time, str):
+                        # 兼容带 Z 或不带时区信息的 ISO 字符串
+                        start_time = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
+                    elif isinstance(raw_time, datetime):
+                        # 如果已经是 datetime 对象（日志报错的主因），直接使用
+                        start_time = raw_time
+                    else:
+                        logger.warning(f"未知的时间格式: {type(raw_time)} for user {user.get('user_id')}")
+                        continue
+
+                    # 统一转为带时区的北京时间进行比较
                     if start_time.tzinfo is None:
                         start_time = beijing_tz.localize(start_time)
+                    # --------------------------------------
 
-                    elapsed_seconds = (now - start_time).total_seconds()
+                    elapsed_seconds = int((now - start_time).total_seconds())
 
-                    # 判定是否超过 2 小时 (7200秒)
+                    # 判定 2 小时超时 (7200秒)
                     if elapsed_seconds >= 7200:
                         chat_id = user["chat_id"]
                         uid = user["user_id"]
                         act = user["current_activity"]
-                        nickname = user["nickname"]
+                        nickname = user.get("nickname", "未知成员")
 
-                        logger.info(
-                            f"⚠️ 用户 {nickname}({uid}) 活动 {act} 已超时，执行强制回座"
-                        )
+                        # 格式化显示：小时分
+                        h, m = divmod(elapsed_seconds // 60, 60)
+                        time_display = f"{h}小时{m}分" if h > 0 else f"{m}分"
 
-                        # A. 数据库结算：调用已有的方法结算活动
-                        # 最后一个参数 False 表示非正常结束
+                        # A. 数据库结算
                         await db.complete_user_activity(
-                            chat_id, uid, act, int(elapsed_seconds), 0, False
+                            chat_id, uid, act, elapsed_seconds, 0, False
                         )
 
-                        # B. 🆕 关键：向群组推送通知
+                        # B. 推送通知
                         mention = MessageFormatter.format_user_link(uid, nickname)
                         alert_msg = (
                             f"📢 <b>自动强制回座通知</b>\n"
                             f"━━━━━━━━━━━━━━\n"
                             f"👤 成员：{mention}\n"
                             f"🏃 活动：<code>{act}</code>\n"
-                            f"⏰ 持续：{MessageFormatter.format_time(int(elapsed_seconds))}\n"
-                            f"🚫 状态：<b>已连续超过 2 小时未回座</b>\n"
-                            f"📢 结果：系统已强制结束该活动，请注意休息。"
+                            f"⏰ 持续：<b>{time_display}</b>\n"
+                            f"🚫 状态：已连续超过 2 小时未回座\n"
+                            f"📢 结果：系统已强制结束该活动。"
                         )
 
-                        # 调用项目中已有的通知服务
                         await notification_service.send_message(chat_id, alert_msg)
 
                 except Exception as user_err:
-                    logger.error(
-                        f"处理用户 {user.get('user_id')} 超时逻辑出错: {user_err}"
-                    )
+                    logger.error(f"处理用户 {user.get('user_id')} 逻辑出错: {user_err}")
                     continue
+
+            # 首次运行标记结束
+            if is_first_run:
+                logger.info("✅ 启动首轮自检完成")
+                is_first_run = False
 
         except Exception as e:
             logger.error(f"健康监控任务循环失败: {e}")
-            traceback.print_exc()
-
-        # 每 60 秒检查一次
-        await asyncio.sleep(60)
+            # 如果主循环报错，缩短等待时间以便快速尝试恢复
+            await asyncio.sleep(10)
 
 
 # ========== Web服务器 ==========
