@@ -1165,30 +1165,81 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
 
 # 🎯 【新增】异步发送超时通知函数
 async def send_overtime_notification_async(
-    chat_id: int, uid: int, user_data: dict, act: str, fine_amount: int, now: datetime
+    chat_id: int,
+    uid: int,
+    user_data: dict,
+    act: str,
+    fine_amount: int,
+    now: datetime = None,
 ):
-    """异步发送超时通知"""
+    """异步发送超时通知 - 深度修复版"""
     try:
-        chat_title = str(chat_id)
-        try:
-            chat_info = await bot.get_chat(chat_id)
-            chat_title = chat_info.title or chat_title
-        except Exception:
-            pass
+        # 1. 确保时间存在且带时区
+        if now is None:
+            from utils import get_beijing_time
 
+            now = get_beijing_time()
+
+        # 2. 安全获取 bot 实例
+        # 从全局 notification_service 中获取已经初始化好的 bot
+        from utils import notification_service
+
+        current_bot = notification_service.bot
+
+        # 3. 安全获取用户信息
+        nickname = user_data.get("nickname", user_data.get("full_name", f"用户{uid}"))
+
+        # 4. 时间格式转换异常处理
+        start_time_raw = user_data.get("activity_start_time") or user_data.get(
+            "start_time"
+        )
+        if not start_time_raw:
+            logger.error(f"❌ 用户 {uid} 缺少开始时间数据，无法计算超时")
+            return
+
+        if isinstance(start_time_raw, str):
+            start_time = datetime.fromisoformat(start_time_raw)
+        else:
+            start_time = start_time_raw
+
+        # 5. 计算超时时长
+        time_limit = await db.get_activity_time_limit(act)
+        time_limit_seconds = time_limit * 60
+        elapsed = (now - start_time).total_seconds()
+        overtime_seconds = max(0, int(elapsed - time_limit_seconds))
+        overtime_str = MessageFormatter.format_time(overtime_seconds)
+
+        # 6. 安全获取群组标题
+        chat_title = f"群组{chat_id}"
+        if current_bot:
+            try:
+                chat_info = await current_bot.get_chat(chat_id)
+                chat_title = chat_info.title
+            except Exception:
+                pass
+
+        # 7. 构建消息 (使用 HTML 格式)
         notif_text = (
-            f"🚨 <b>超时回座通知</b>\n"
+            f"🚨 <b>超时未回座通知</b>\n"
             f"🏢 群组：<code>{chat_title}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
-            f"👤 用户：{MessageFormatter.format_user_link(uid, user_data.get('nickname', '未知用户'))}\n"
+            f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
             f"📝 活动：<code>{act}</code>\n"
-            f"⏰ 回座时间：<code>{now.strftime('%m/%d %H:%M:%S')}</code>\n"
-            f"⏱️ 超时：<code>{MessageFormatter.format_time(int((now - datetime.fromisoformat(user_data['activity_start_time'])).total_seconds() - (await db.get_activity_time_limit(act)) * 60))}</code>\n"
-            f"💰 罚款：<code>{fine_amount}</code> 元"
+            f"⏰ 限定时长：<code>{time_limit} 分钟</code>\n"
+            f"⏱️ 已消耗：<code>{MessageFormatter.format_time(int(elapsed))}</code>\n"
+            f"⚠️ <b>超时时长：{overtime_str}</b>\n"
         )
-        await notification_service.send_notification(chat_id, notif_text)
+
+        if fine_amount > 0:
+            notif_text += f"💰 预估罚款：<code>{fine_amount}</code> 元\n"
+
+        # 8. 发送通知
+        await notification_service.send_notification(
+            chat_id, notif_text, notification_type="overtime"
+        )
+
     except Exception as e:
-        logger.error(f"超时通知推送异常: {e}")
+        logger.error(f"❌ 超时通知推送异常: {e}\n{traceback.format_exc()}")
 
 
 # ========== 上下班打卡功能 ==========
@@ -2912,7 +2963,7 @@ async def cmd_setworkfine(message: types.Message):
 async def cmd_showsettings(message: types.Message):
     """显示目前的设置 - 修复排序与格式化崩溃版本"""
     chat_id = message.chat.id
-    
+
     try:
         # 1. 数据初始化与获取
         await db.init_group(chat_id)
@@ -2945,8 +2996,12 @@ async def cmd_showsettings(message: types.Message):
         text += f"• 绑定频道: <code>{group_data.get('channel_id', '未设置')}</code>\n"
         text += f"• 通知群组: <code>{group_data.get('notification_group_id', '未设置')}</code>\n"
         text += f"• 每日重置: <code>{group_data.get('reset_hour', 0):02d}:{group_data.get('reset_minute', 0):02d}</code>\n"
-        text += f"• 上班时间: <code>{group_data.get('work_start_time', '09:00')}</code>\n"
-        text += f"• 下班时间: <code>{group_data.get('work_end_time', '18:00')}</code>\n\n"
+        text += (
+            f"• 上班时间: <code>{group_data.get('work_start_time', '09:00')}</code>\n"
+        )
+        text += (
+            f"• 下班时间: <code>{group_data.get('work_end_time', '18:00')}</code>\n\n"
+        )
 
         # 活动设置
         text += "🎯 <b>活动次数/时间限制：</b>\n"
@@ -2964,7 +3019,9 @@ async def cmd_showsettings(message: types.Message):
                 has_fine_settings = True
                 # 使用安全排序修复崩溃
                 sorted_fines = sorted(fr.items(), key=safe_sort_key)
-                fines_text = " | ".join([f"{str(k).replace('min','')}: {v}元" for k, v in sorted_fines])
+                fines_text = " | ".join(
+                    [f"{str(k).replace('min','')}: {v}元" for k, v in sorted_fines]
+                )
                 text += f"• <code>{act}</code>：{fines_text}\n"
 
         if not has_fine_settings:
@@ -2972,7 +3029,7 @@ async def cmd_showsettings(message: types.Message):
 
         # 上下班罚款设置
         text += "\n⏰ <b>上下班罚款设置：</b>\n"
-        
+
         # 上班排序修复
         start_fines = work_fine_rates.get("work_start", {})
         if start_fines:
@@ -3003,8 +3060,11 @@ async def cmd_showsettings(message: types.Message):
     except Exception as e:
         logger.error(f"❌ 显示设置失败: {e}")
         import traceback
+
         logger.error(traceback.format_exc())
-        await message.answer("⚠️ <b>面板加载失败</b>\n原因：设置项中存在非标准字符或数据格式不兼容，请联系技术检查后台配置。")
+        await message.answer(
+            "⚠️ <b>面板加载失败</b>\n原因：设置项中存在非标准字符或数据格式不兼容，请联系技术检查后台配置。"
+        )
 
 
 # ========== 查看工作时间命令 =========
@@ -3739,12 +3799,16 @@ async def health_monitoring_task():
                     # --- 🆕 核心修复：健壮的时间解析逻辑 ---
                     if isinstance(raw_time, str):
                         # 兼容带 Z 或不带时区信息的 ISO 字符串
-                        start_time = datetime.fromisoformat(raw_time.replace('Z', '+00:00'))
+                        start_time = datetime.fromisoformat(
+                            raw_time.replace("Z", "+00:00")
+                        )
                     elif isinstance(raw_time, datetime):
                         # 如果已经是 datetime 对象（日志报错的主因），直接使用
                         start_time = raw_time
                     else:
-                        logger.warning(f"未知的时间格式: {type(raw_time)} for user {user.get('user_id')}")
+                        logger.warning(
+                            f"未知的时间格式: {type(raw_time)} for user {user.get('user_id')}"
+                        )
                         continue
 
                     # 统一转为带时区的北京时间进行比较
