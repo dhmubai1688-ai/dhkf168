@@ -1370,7 +1370,7 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             has_record_today = False
 
         if has_record_today:
-            today_records = await db.get_today_work_records(chat_id, uid)
+            today_records = await db.get_today_work_records_fixed(chat_id, uid)
             existing_record = today_records.get(checkin_type)
             action_text = "上班" if checkin_type == "work_start" else "下班"
             status_msg = f"🚫 您今天已经打过{action_text}卡了！"
@@ -1393,7 +1393,7 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
         if checkin_type == "work_start":
             has_work_end_today = await db.has_work_record_today(chat_id, uid, "work_end")
             if has_work_end_today:
-                today_records = await db.get_today_work_records(chat_id, uid)
+                today_records = await db.get_today_work_records_fixed(chat_id, uid)
                 end_record = today_records.get("work_end")
                 end_time = end_record["checkin_time"] if end_record else "未知时间"
 
