@@ -3629,13 +3629,6 @@ async def export_and_push_csv(
             date_str = get_beijing_time().strftime("%Y%m%d_%H%M%S")
         file_name = f"group_{chat_id}_statistics_{date_str}.csv"
 
-    # 🆕 关键修复：检查是否是重置后的导出（目标日期是昨天）
-    now = get_beijing_time()
-    is_reset_export = False
-    if target_date and target_date == (now - timedelta(days=1)).date():
-        is_reset_export = True
-        logger.info(f"🔄 检测到重置后导出，将从月度表恢复 {target_date} 的数据")
-
     csv_buffer = StringIO()
     writer = csv.writer(csv_buffer)
 
@@ -3658,12 +3651,8 @@ async def export_and_push_csv(
 
     has_data = False
 
-    if is_reset_export:
-        # 🆕 重置后导出：从月度表获取数据
-        group_stats = await get_group_stats_from_monthly(chat_id, target_date)
-    else:
-        # 正常导出：从日常表获取数据
-        group_stats = await db.get_group_statistics(chat_id, target_date)
+    # ✅ 修改：直接调用 get_group_statistics，不再判断是否为重置后导出
+    group_stats = await db.get_group_statistics(chat_id, target_date)
 
     # 处理每个用户的数据
     for user_data in group_stats:
