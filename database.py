@@ -1633,40 +1633,63 @@ class PostgreSQLDatabase:
             logger.error(f"检查工作记录失败 {chat_id}-{user_id}: {e}")
             return False
 
-    async def get_today_work_records(
+    # 在 database.py 中添加修复后的函数
+    async def get_today_work_records_fixed(
         self, chat_id: int, user_id: int
     ) -> Dict[str, Dict]:
-        """获取用户今天的上下班记录 - 每个群组独立重置时间"""
+        """修复版：获取用户今天的上下班记录 - 每个群组独立重置时间"""
         try:
-            # 每个群组独立的重置时间计算
+            # 获取群组重置时间
             group_data = await self.get_group_cached(chat_id)
             reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
             reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
 
             now = self.get_beijing_time()
+
+            # 计算今天的重置时间点
             reset_time_today = now.replace(
                 hour=reset_hour, minute=reset_minute, second=0, microsecond=0
             )
 
-            # 计算当前重置周期开始时间
+            # 确定当前重置周期的开始时间
             if now < reset_time_today:
                 period_start = reset_time_today - timedelta(days=1)
             else:
                 period_start = reset_time_today
 
-            self._ensure_pool_initialized()
+            # 查询从重置周期开始到现在的记录
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
-                    "SELECT * FROM work_records WHERE chat_id = $1 AND user_id = $2 AND record_date >= $3",
+                    """
+                    SELECT * FROM work_records 
+                    WHERE chat_id = $1 
+                    AND user_id = $2 
+                    AND record_date >= $3
+                    AND record_date <= $4
+                    ORDER BY record_date DESC, checkin_type
+                    """,
                     chat_id,
                     user_id,
                     period_start.date(),
+                    now.date(),  # 添加上限，避免查询未来日期
                 )
 
                 records = {}
                 for row in rows:
-                    records[row["checkin_type"]] = dict(row)
+                    # 按记录日期分组，只取每个类型的最新记录
+                    record_key = f"{row['record_date']}_{row['checkin_type']}"
+                    if (
+                        row["checkin_type"] not in records
+                        or row["record_date"]
+                        > records[row["checkin_type"]]["record_date"]
+                    ):
+                        records[row["checkin_type"]] = dict(row)
+
+                logger.debug(
+                    f"工作记录查询: {chat_id}-{user_id}, 重置周期: {period_start.date()}, 记录数: {len(records)}"
+                )
                 return records
+
         except Exception as e:
             logger.error(f"获取工作记录失败 {chat_id}-{user_id}: {e}")
             return {}
@@ -2180,6 +2203,53 @@ class PostgreSQLDatabase:
                 )
                 rankings[activity] = [dict(row) for row in rows]
             return rankings
+
+    async def get_user_late_early_counts(
+        self, chat_id: int, user_id: int, year: int, month: int
+    ) -> Dict[str, int]:
+        """获取用户的迟到早退次数统计"""
+        start_date = date(year, month, 1)
+        if month == 12:
+            end_date = date(year + 1, 1, 1)
+        else:
+            end_date = date(year, month + 1, 1)
+
+        async with self.pool.acquire() as conn:
+            # 获取迟到次数（上班时间差>0）
+            late_count = (
+                await conn.fetchval(
+                    """
+                SELECT COUNT(*) FROM work_records 
+                WHERE chat_id = $1 AND user_id = $2 
+                AND record_date >= $3 AND record_date < $4
+                AND checkin_type = 'work_start' AND time_diff_minutes > 0
+                """,
+                    chat_id,
+                    user_id,
+                    start_date,
+                    end_date,
+                )
+                or 0
+            )
+
+            # 获取早退次数（下班时间差<0）
+            early_count = (
+                await conn.fetchval(
+                    """
+                SELECT COUNT(*) FROM work_records 
+                WHERE chat_id = $1 AND user_id = $2 
+                AND record_date >= $3 AND record_date < $4
+                AND checkin_type = 'work_end' AND time_diff_minutes < 0
+                """,
+                    chat_id,
+                    user_id,
+                    start_date,
+                    end_date,
+                )
+                or 0
+            )
+
+            return {"late_count": late_count, "early_count": early_count}
 
     # ========== 数据清理 ==========
     async def cleanup_old_data(self, days: int = 30):
