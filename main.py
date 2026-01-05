@@ -1242,18 +1242,18 @@ async def send_overtime_notification_async(
         # 🎯 直接从传入的 user_data 获取开始时间
         activity_start_time = user_data.get("activity_start_time")
         nickname = user_data.get("nickname", "未知用户")
-        
+
         overtime_str = "未知时长"
-        
+
         if activity_start_time:
             try:
                 # 内联时间解析
                 start_time = None
                 clean_str = str(activity_start_time).strip()
-                
+
                 if clean_str.endswith("Z"):
                     clean_str = clean_str.replace("Z", "+00:00")
-                
+
                 # 尝试ISO格式
                 try:
                     start_time = datetime.fromisoformat(clean_str)
@@ -1268,7 +1268,7 @@ async def send_overtime_notification_async(
                         "%m/%d %H:%M:%S",
                         "%m/%d %H:%M",
                     ]
-                    
+
                     for fmt in formats:
                         try:
                             start_time = datetime.strptime(clean_str, fmt)
@@ -1279,25 +1279,27 @@ async def send_overtime_notification_async(
                             break
                         except ValueError:
                             continue
-                
+
                 if start_time:
                     # 获取活动时间限制
                     time_limit_minutes = await db.get_activity_time_limit(act)
                     time_limit_seconds = time_limit_minutes * 60
-                    
+
                     # 计算总时长
                     total_elapsed = int((now - start_time).total_seconds())
-                    
+
                     # 计算超时时长
                     if total_elapsed > time_limit_seconds:
                         overtime_seconds = total_elapsed - time_limit_seconds
                         overtime_str = MessageFormatter.format_time(overtime_seconds)
-                        logger.info(f"✅ 超时计算: {overtime_seconds}秒 ({overtime_str})")
+                        logger.info(
+                            f"✅ 超时计算: {overtime_seconds}秒 ({overtime_str})"
+                        )
                     else:
                         overtime_str = "未超时"
                 else:
                     overtime_str = "时间解析失败"
-                        
+
             except Exception as e:
                 logger.error(f"时间计算失败: {e}")
                 overtime_str = "计算失败"
@@ -1318,8 +1320,8 @@ async def send_overtime_notification_async(
         )
 
         # 添加调试信息（管理员可见）
-        if await is_admin(uid):
-            notif_text += f"\n\n🔍 调试信息：\n开始时间：{activity_start_time}"
+        # if await is_admin(uid):
+        #     notif_text += f"\n\n🔍 调试信息：\n开始时间：{activity_start_time}"
 
         await notification_service.send_notification(chat_id, notif_text)
         logger.info(f"✅ 超时通知发送成功: {chat_id} - 用户{uid} - {act}")
@@ -1327,6 +1329,7 @@ async def send_overtime_notification_async(
     except Exception as e:
         logger.error(f"❌ 超时通知推送异常: {e}")
         import traceback
+
         logger.error(f"完整堆栈：{traceback.format_exc()}")
 
 
@@ -3604,7 +3607,6 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         return []
 
 
-# ========== 数据导出功能 ==========
 # ========== 数据导出功能 ==========
 async def export_and_push_csv(
     chat_id: int,
