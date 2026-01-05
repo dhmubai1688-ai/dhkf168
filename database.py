@@ -1848,6 +1848,49 @@ class PostgreSQLDatabase:
                 fine_amount,
             )
 
+    async def calculate_fine_for_activity(
+        self, activity: str, overtime_minutes: float
+    ) -> int:
+        """计算活动罚款金额 - 数据库内部版本"""
+        fine_rates = await self.get_fine_rates_for_activity(activity)
+        if not fine_rates:
+            return 0
+
+        # 处理罚款时间段
+        segments = []
+        for time_key in fine_rates.keys():
+            try:
+                if isinstance(time_key, str) and "min" in time_key.lower():
+                    time_value = int(time_key.lower().replace("min", "").strip())
+                else:
+                    time_value = int(time_key)
+                segments.append(time_value)
+            except (ValueError, TypeError):
+                continue
+
+        if not segments:
+            return 0
+
+        segments.sort()
+
+        applicable_fine = 0
+        for segment in segments:
+            if overtime_minutes <= segment:
+                original_key = str(segment)
+                if original_key not in fine_rates:
+                    original_key = f"{segment}min"
+                applicable_fine = fine_rates.get(original_key, 0)
+                break
+
+        if applicable_fine == 0 and segments:
+            max_segment = segments[-1]
+            original_key = str(max_segment)
+            if original_key not in fine_rates:
+                original_key = f"{max_segment}min"
+            applicable_fine = fine_rates.get(original_key, 0)
+
+        return applicable_fine
+
     async def get_work_fine_rates(self) -> Dict:
         """获取上下班罚款费率"""
         self._ensure_pool_initialized()
