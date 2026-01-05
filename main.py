@@ -543,7 +543,7 @@ async def recover_expired_activities():
 
 # ========== 每日重置逻辑 =========
 async def reset_daily_data_if_needed(chat_id: int, uid: int):
-    """精确版每日数据重置 - 每个群组独立重置时间"""
+    """精确版每日数据重置 - 每个群组独立重置时间 - 修复版"""
     try:
         now = get_beijing_time()
 
@@ -637,7 +637,7 @@ async def can_perform_activities(chat_id: int, uid: int) -> tuple[bool, str]:
     await reset_daily_data_if_needed(chat_id, uid)
 
     # 使用修复后的 get_today_work_records（现在基于重置周期）
-    today_records = await db.get_today_work_records(chat_id, uid)
+    today_records = await db.get_today_work_records_fixed(chat_id, uid)  # 使用修复版
 
     if "work_start" not in today_records:
         return False, "❌ 请先打上班卡！"
@@ -766,12 +766,13 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
 
 # ========== 活动定时提醒 ==========
 async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
-    """活动定时提醒任务"""
+    """活动定时提醒任务 - 稳定修复版（保留原接口）"""
     try:
         one_minute_warning_sent = False
         timeout_immediate_sent = False
         timeout_5min_sent = False
         last_reminder_minute = 0
+        force_back_sent = False  # 防止重复强制回座
 
         while True:
             user_lock = user_lock_manager.get_lock(chat_id, uid)
@@ -783,10 +784,9 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                 start_time = datetime.fromisoformat(user_data["activity_start_time"])
                 elapsed = (get_beijing_time() - start_time).total_seconds()
                 remaining = limit * 60 - elapsed
-
                 nickname = user_data.get("nickname", str(uid))
 
-            # 1分钟前警告
+            # ===== 1 分钟预警 =====
             if 0 < remaining <= 60 and not one_minute_warning_sent:
                 warning_msg = (
                     f"⏳ <b>即将超时警告</b>\n"
@@ -809,73 +809,49 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                 )
                 one_minute_warning_sent = True
 
-            # 超时提醒
+            # ===== 超时提醒 =====
             if remaining <= 0:
                 overtime_minutes = int(-remaining // 60)
 
                 if overtime_minutes == 0 and not timeout_immediate_sent:
-                    timeout_msg = (
+                    timeout_immediate_sent = True
+                    last_reminder_minute = 0
+
+                    msg = (
                         f"⚠️ <b>超时警告</b>\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                         f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经<code>超时</code>！\n"
                         f"🏃‍♂️ 请立即回座，避免产生更多罚款！"
                     )
-                    back_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="👉 点击✅立即回座 👈",
-                                    callback_data=f"quick_back:{chat_id}:{uid}",
-                                )
-                            ]
-                        ]
-                    )
-                    await bot.send_message(
-                        chat_id,
-                        timeout_msg,
-                        parse_mode="HTML",
-                        reply_markup=back_keyboard,
-                    )
-                    timeout_immediate_sent = True
-                    last_reminder_minute = 0
 
                 elif overtime_minutes == 5 and not timeout_5min_sent:
-                    timeout_msg = (
+                    timeout_5min_sent = True
+                    last_reminder_minute = 5
+
+                    msg = (
                         f"🔔 <b>超时警告</b>\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                         f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>5</code> 分钟！\n"
                         f"😤 请立即回座，避免罚款增加！"
                     )
-                    back_keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="👉 点击✅立即回座 👈",
-                                    callback_data=f"quick_back:{chat_id}:{uid}",
-                                )
-                            ]
-                        ]
-                    )
-                    await bot.send_message(
-                        chat_id,
-                        timeout_msg,
-                        parse_mode="HTML",
-                        reply_markup=back_keyboard,
-                    )
-                    timeout_5min_sent = True
-                    last_reminder_minute = 5
 
                 elif (
                     overtime_minutes >= 10
                     and overtime_minutes % 10 == 0
                     and overtime_minutes > last_reminder_minute
                 ):
-                    timeout_msg = (
+                    last_reminder_minute = overtime_minutes
+
+                    msg = (
                         f"🚨 <b>超时警告</b>\n"
                         f"👤 用户：{MessageFormatter.format_user_link(uid, nickname)}\n"
                         f"❌ 您的 {MessageFormatter.format_copyable_text(act)} 已经超时 <code>{overtime_minutes}</code> 分钟！\n"
                         f"💢 请立即回座！"
                     )
+                else:
+                    msg = None
+
+                if msg:
                     back_keyboard = InlineKeyboardMarkup(
                         inline_keyboard=[
                             [
@@ -887,21 +863,18 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                         ]
                     )
                     await bot.send_message(
-                        chat_id,
-                        timeout_msg,
-                        parse_mode="HTML",
-                        reply_markup=back_keyboard,
+                        chat_id, msg, parse_mode="HTML", reply_markup=back_keyboard
                     )
-                    last_reminder_minute = overtime_minutes
 
-            # 检查超时强制回座
+            # ===== 2 小时强制回座 =====
             user_lock = user_lock_manager.get_lock(chat_id, uid)
             async with user_lock:
                 user_data = await db.get_user_cached(chat_id, uid)
                 if user_data and user_data["current_activity"] == act:
-                    if remaining <= -120 * 60:  # 2小时强制回座
+                    if remaining <= -120 * 60 and not force_back_sent:
+                        force_back_sent = True
+
                         overtime_minutes = 120
-                        overtime_seconds = 120 * 60
                         fine_amount = await calculate_fine(act, overtime_minutes)
 
                         elapsed = (
@@ -925,6 +898,7 @@ async def activity_timer(chat_id: int, uid: int, act: str, limit: int):
                         await bot.send_message(
                             chat_id, auto_back_msg, parse_mode="HTML"
                         )
+
                         await timer_manager.cancel_timer(f"{chat_id}-{uid}")
                         break
 
@@ -2007,19 +1981,21 @@ async def cmd_export(message: types.Message):
 
 # ========== 月度报告函数 ==========
 async def optimized_monthly_export(chat_id: int, year: int, month: int):
-    """紧急修复版月度数据导出"""
+    """稳定版月度数据导出 - 完整工作数据 + 兼容旧接口"""
+
     try:
-        # 获取活动配置
+        # ===== 1. 活动配置 =====
         activity_limits = await db.get_activity_limits_cached()
         activity_names = list(activity_limits.keys())
 
         csv_buffer = StringIO()
         writer = csv.writer(csv_buffer)
 
-        # 构建表头
+        # ===== 2. 构建表头 =====
         headers = ["用户ID", "用户昵称"]
         for act in activity_names:
             headers.extend([f"{act}次数", f"{act}总时长"])
+
         headers.extend(
             [
                 "活动次数总计",
@@ -2029,41 +2005,36 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
                 "总超时时间",
                 "工作天数",
                 "工作时长",
+                "上班次数",
+                "下班次数",
+                "迟到次数",
+                "早退次数",
+                "上下班罚款",
             ]
         )
         writer.writerow(headers)
 
-        # 使用现有的月度统计方法
+        # ===== 3. 获取月度统计 =====
         monthly_stats = await db.get_monthly_statistics(chat_id, year, month)
-
         if not monthly_stats:
             logger.warning(f"月度统计表中没有找到 {year}年{month}月 的数据")
             return None
 
-        # 🆕 紧急修复：检查数据结构
-        logger.info(
-            f"月度统计数据样本类型: {type(monthly_stats[0]) if monthly_stats else '无数据'}"
-        )
-        logger.info(
-            f"月度统计数据样本: {monthly_stats[0] if monthly_stats else '无数据'}"
-        )
+        # ===== 4. 获取工作统计 =====
+        work_stats = await db.get_monthly_work_statistics(chat_id, year, month)
+        work_stats_dict = {stat["user_id"]: stat for stat in work_stats}
 
-        # 处理每个用户的数据
+        # ===== 5. 填充数据 =====
         for user_stat in monthly_stats:
-            # 🆕 紧急修复：确保 user_stat 是字典
             if not isinstance(user_stat, dict):
-                logger.warning(
-                    f"跳过非字典类型的用户数据: {type(user_stat)} - {user_stat}"
-                )
                 continue
 
-            # 🆕 安全获取字段
             user_id = user_stat.get("user_id", "未知")
             nickname = user_stat.get("nickname", "未知用户")
 
             row = [user_id, nickname]
 
-            # 🆕 紧急修复：安全获取 activities
+            # 活动数据安全解析
             user_activities = user_stat.get("activities", {})
             if isinstance(user_activities, str):
                 try:
@@ -2083,12 +2054,15 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
 
                 count = activity_info.get("count", 0)
                 time_seconds = activity_info.get("time", 0)
-                time_formatted = db.format_time_for_csv(time_seconds)
-
                 row.append(count)
-                row.append(time_formatted)
+                row.append(db.format_time_for_csv(time_seconds))
 
-            # 🆕 安全获取统计字段
+            # 工作相关统计
+            work_data = work_stats_dict.get(user_id, {})
+            late_early_counts = await db.get_user_late_early_counts(
+                chat_id, user_id, year, month
+            )
+
             row.extend(
                 [
                     user_stat.get("total_activity_count", 0),
@@ -2098,6 +2072,12 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
                     db.format_time_for_csv(user_stat.get("total_overtime_time", 0)),
                     user_stat.get("work_days", 0),
                     db.format_time_for_csv(user_stat.get("work_hours", 0)),
+                    work_data.get("work_start_count", 0),
+                    work_data.get("work_end_count", 0),
+                    late_early_counts.get("late_count", 0),
+                    late_early_counts.get("early_count", 0),
+                    work_data.get("work_start_fines", 0)
+                    + work_data.get("work_end_fines", 0),
                 ]
             )
 
@@ -2106,7 +2086,7 @@ async def optimized_monthly_export(chat_id: int, year: int, month: int):
         return csv_buffer.getvalue()
 
     except Exception as e:
-        logger.error(f"❌ 月度导出优化版失败: {e}")
+        logger.error(f"❌ 月度导出失败: {e}")
         import traceback
 
         logger.error(traceback.format_exc())
