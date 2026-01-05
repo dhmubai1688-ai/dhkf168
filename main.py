@@ -52,7 +52,6 @@ from utils import (
     rate_limit,
     get_group_reset_period_start,
     send_reset_notification,
-    parse_activity_start_time,
 )
 
 from bot_manager import bot_manager
@@ -1087,26 +1086,48 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
         start_time_dt = None
         try:
             if activity_start_time_str:
-                # 使用现有的 parse_activity_start_time 函数
-                start_time_dt = parse_activity_start_time(activity_start_time_str)
+                # 内联时间解析逻辑
+                clean_str = str(activity_start_time_str).strip()
+
+                # 处理时区格式
+                if clean_str.endswith("Z"):
+                    clean_str = clean_str.replace("Z", "+00:00")
+
+                # 尝试ISO格式
+                try:
+                    start_time_dt = datetime.fromisoformat(clean_str)
+                    if start_time_dt.tzinfo is None:
+                        start_time_dt = beijing_tz.localize(start_time_dt)
+                except ValueError:
+                    # 尝试常见格式
+                    formats = [
+                        "%Y-%m-%d %H:%M:%S.%f",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d %H:%M",
+                        "%m/%d %H:%M:%S",
+                        "%m/%d %H:%M",
+                    ]
+
+                    for fmt in formats:
+                        try:
+                            start_time_dt = datetime.strptime(clean_str, fmt)
+                            # 如果格式中没有年份，添加当前年份
+                            if fmt.startswith("%m/%d"):
+                                start_time_dt = start_time_dt.replace(year=now.year)
+                            break
+                        except ValueError:
+                            continue
+
+                    if start_time_dt and start_time_dt.tzinfo is None:
+                        start_time_dt = beijing_tz.localize(start_time_dt)
+
         except Exception as e:
             logger.error(f"解析开始时间失败: {activity_start_time_str}, 错误: {e}")
 
         if not start_time_dt:
-            # 如果解析失败，尝试其他方法
-            try:
-                if activity_start_time_str:
-                    # 直接尝试 ISO 格式
-                    start_time_dt = datetime.fromisoformat(
-                        activity_start_time_str.replace("Z", "+00:00")
-                    )
-                    if start_time_dt.tzinfo is None:
-                        start_time_dt = beijing_tz.localize(start_time_dt)
-            except Exception as e:
-                logger.error(f"备用时间解析也失败: {e}")
-                # 使用当前时间作为备用
-                start_time_dt = now
-                logger.warning(f"使用当前时间作为备用开始时间: {start_time_dt}")
+            # 如果解析失败，使用当前时间作为备用
+            logger.warning(f"时间解析失败，使用当前时间作为备用")
+            start_time_dt = now
 
         # 计算经过的时间
         elapsed = (now - start_time_dt).total_seconds()
@@ -1158,7 +1179,7 @@ async def _process_back_locked(message: types.Message, chat_id: int, uid: int):
         await message.answer(
             MessageFormatter.format_back_message(
                 user_id=uid,
-                user_name=user_data.get("nickname", nickname),  # 使用更新后的昵称
+                user_name=user_data.get("nickname", nickname),
                 activity=act,
                 time_str=time_str,
                 elapsed_time=elapsed_time_str,
@@ -1221,34 +1242,62 @@ async def send_overtime_notification_async(
         # 🎯 直接从传入的 user_data 获取开始时间
         activity_start_time = user_data.get("activity_start_time")
         nickname = user_data.get("nickname", "未知用户")
-
+        
         overtime_str = "未知时长"
-
+        
         if activity_start_time:
             try:
-                # 解析开始时间
-                start_time = parse_activity_start_time(activity_start_time)
-                if not start_time:
-                    logger.warning(f"无法解析开始时间: {activity_start_time}")
-                    overtime_str = "时间解析失败"
-                else:
+                # 内联时间解析
+                start_time = None
+                clean_str = str(activity_start_time).strip()
+                
+                if clean_str.endswith("Z"):
+                    clean_str = clean_str.replace("Z", "+00:00")
+                
+                # 尝试ISO格式
+                try:
+                    start_time = datetime.fromisoformat(clean_str)
+                    if start_time.tzinfo is None:
+                        start_time = beijing_tz.localize(start_time)
+                except ValueError:
+                    # 尝试常见格式
+                    formats = [
+                        "%Y-%m-%d %H:%M:%S.%f",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%Y-%m-%d %H:%M",
+                        "%m/%d %H:%M:%S",
+                        "%m/%d %H:%M",
+                    ]
+                    
+                    for fmt in formats:
+                        try:
+                            start_time = datetime.strptime(clean_str, fmt)
+                            if fmt.startswith("%m/%d"):
+                                start_time = start_time.replace(year=now.year)
+                            if start_time.tzinfo is None:
+                                start_time = beijing_tz.localize(start_time)
+                            break
+                        except ValueError:
+                            continue
+                
+                if start_time:
                     # 获取活动时间限制
                     time_limit_minutes = await db.get_activity_time_limit(act)
                     time_limit_seconds = time_limit_minutes * 60
-
+                    
                     # 计算总时长
                     total_elapsed = int((now - start_time).total_seconds())
-
+                    
                     # 计算超时时长
                     if total_elapsed > time_limit_seconds:
                         overtime_seconds = total_elapsed - time_limit_seconds
                         overtime_str = MessageFormatter.format_time(overtime_seconds)
-                        logger.info(
-                            f"✅ 超时计算: {overtime_seconds}秒 ({overtime_str})"
-                        )
+                        logger.info(f"✅ 超时计算: {overtime_seconds}秒 ({overtime_str})")
                     else:
                         overtime_str = "未超时"
-
+                else:
+                    overtime_str = "时间解析失败"
+                        
             except Exception as e:
                 logger.error(f"时间计算失败: {e}")
                 overtime_str = "计算失败"
@@ -1278,7 +1327,6 @@ async def send_overtime_notification_async(
     except Exception as e:
         logger.error(f"❌ 超时通知推送异常: {e}")
         import traceback
-
         logger.error(f"完整堆栈：{traceback.format_exc()}")
 
 
