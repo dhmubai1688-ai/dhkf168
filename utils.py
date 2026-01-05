@@ -5,7 +5,7 @@ import logging
 import gc
 import psutil
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional, Tuple
 from config import Config, beijing_tz
 from functools import wraps
@@ -1004,6 +1004,73 @@ async def get_group_reset_period_start(
         )
 
 
+# 在 utils.py 中添加以下函数
+
+
+async def get_reset_period_date(chat_id: int, target_date: datetime = None) -> date:
+    """根据群组重置时间获取重置周期日期"""
+    if target_date is None:
+        target_date = get_beijing_time()
+
+    try:
+        # 获取群组重置时间
+        group_data = await db.get_group_cached(chat_id)
+        if not group_data:
+            await db.init_group(chat_id)
+            group_data = await db.get_group_cached(chat_id)
+
+        reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        # 计算重置时间点
+        reset_time = target_date.replace(
+            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+        )
+
+        # 判断当前时间是否在重置周期内
+        if target_date < reset_time:
+            # 当前时间在今天重置时间之前，属于昨天的周期
+            return (reset_time - timedelta(days=1)).date()
+        else:
+            # 当前时间在今天重置时间之后，属于今天的周期
+            return reset_time.date()
+
+    except Exception as e:
+        logger.error(f"计算重置周期日期失败 {chat_id}: {e}")
+        return target_date.date()
+
+
+async def get_reset_period_start_datetime(
+    chat_id: int, target_dt: datetime = None
+) -> datetime:
+    """获取重置周期开始的完整日期时间"""
+    if target_dt is None:
+        target_dt = get_beijing_time()
+
+    try:
+        group_data = await db.get_group_cached(chat_id)
+        reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
+        reset_minute = group_data.get("reset_minute", Config.DAILY_RESET_MINUTE)
+
+        reset_time_today = target_dt.replace(
+            hour=reset_hour, minute=reset_minute, second=0, microsecond=0
+        )
+
+        if target_dt < reset_time_today:
+            return reset_time_today - timedelta(days=1)
+        else:
+            return reset_time_today
+
+    except Exception as e:
+        logger.error(f"获取重置周期开始时间失败 {chat_id}: {e}")
+        return target_dt.replace(
+            hour=Config.DAILY_RESET_HOUR,
+            minute=Config.DAILY_RESET_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+
+
 # ========== 重置通知函数 ==========
 async def send_reset_notification(
     chat_id: int, completion_result: Dict[str, Any], reset_time: datetime
@@ -1062,6 +1129,65 @@ async def send_reset_notification(
 
     except Exception as e:
         logger.error(f"发送重置通知失败 {chat_id}: {e}")
+
+
+def parse_activity_start_time(start_time_str):
+    """解析活动开始时间 - 健壮版本"""
+    if not start_time_str:
+        return None
+
+    try:
+        # 清理字符串
+        clean_str = str(start_time_str).strip()
+
+        # 处理时区格式
+        if clean_str.endswith("Z"):
+            clean_str = clean_str.replace("Z", "+00:00")
+
+        # 尝试ISO格式
+        try:
+            dt = datetime.fromisoformat(clean_str)
+            if dt.tzinfo is None:
+                dt = beijing_tz.localize(dt)
+            return dt
+        except ValueError:
+            # 尝试常见格式
+            formats = [
+                "%Y-%m-%d %H:%M:%S.%f",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M",
+                "%m/%d %H:%M:%S",
+                "%m/%d %H:%M",
+                "%H:%M:%S",
+                "%H:%M",
+            ]
+
+            current_year = datetime.now(beijing_tz).year
+            current_month = datetime.now(beijing_tz).month
+
+            for fmt in formats:
+                try:
+                    dt = datetime.strptime(clean_str, fmt)
+                    # 如果格式中没有年份，添加当前年份
+                    if fmt.startswith("%m/%d"):
+                        dt = dt.replace(year=current_year)
+                    elif fmt in ["%H:%M:%S", "%H:%M"]:
+                        # 只有时间，需要添加日期
+                        today = datetime.now(beijing_tz)
+                        dt = dt.replace(
+                            year=today.year, month=today.month, day=today.day
+                        )
+
+                    dt = beijing_tz.localize(dt)
+                    return dt
+                except ValueError:
+                    continue
+
+            logger.error(f"无法解析时间格式: {clean_str}")
+            return None
+    except Exception as e:
+        logger.error(f"解析时间失败: {start_time_str}, 错误: {e}")
+        return None
 
 
 # 全局实例
