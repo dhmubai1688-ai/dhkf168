@@ -946,44 +946,53 @@ class PostgreSQLDatabase:
         start_time: str,
         nickname: str = None,
     ):
-        """更新用户活动状态 - 确保时间格式正确"""
+        """更新用户活动状态 - 确保时间格式正确（完整融合稳定版）"""
         try:
-            # 🎯 确保时间格式正确
+            from datetime import datetime
+            from config import beijing_tz
+
             original_type = type(start_time).__name__
 
+            # 🎯 统一转换为标准 ISO 时间字符串（带时区）
             if hasattr(start_time, "isoformat"):
-                # 如果是datetime对象，转换为ISO格式字符串
+                if start_time.tzinfo is None:
+                    start_time = beijing_tz.localize(start_time)
                 start_time_str = start_time.isoformat()
-                logger.debug(
-                    f"🔄 转换datetime对象为ISO格式: {original_type} -> {start_time_str}"
-                )
-            elif isinstance(start_time, str):
-                # 如果是字符串，确保格式正确
-                start_time_str = start_time
-                # 🆕 可选：验证字符串是否是有效的时间格式
-                try:
-                    from datetime import datetime
 
-                    # 快速验证是否是有效的时间字符串
-                    datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
+            elif isinstance(start_time, str):
+                try:
+                    clean_str = start_time.strip()
+
+                    if clean_str.endswith("Z"):
+                        clean_str = clean_str.replace("Z", "+00:00")
+
+                    dt = datetime.fromisoformat(clean_str)
+
+                    if dt.tzinfo is None:
+                        dt = beijing_tz.localize(dt)
+
+                    start_time_str = dt.isoformat()
+
                 except ValueError:
+                    start_time_str = start_time
                     logger.warning(f"⚠️ 时间字符串格式可能无效: {start_time_str}")
+
             else:
-                # 其他类型转换为字符串
                 start_time_str = str(start_time)
                 logger.debug(
                     f"🔄 转换其他类型为字符串: {original_type} -> {start_time_str}"
                 )
 
             logger.info(
-                f"💾 保存活动时间: 用户{user_id}, 活动{activity}, 时间{start_time_str}"
+                f"💾 保存活动时间: 用户{user_id}, 活动{activity}, 标准化时间: {start_time_str}"
             )
 
             if nickname:
                 await self.execute_with_retry(
                     "更新用户活动",
                     """
-                    UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP 
+                    UPDATE users 
+                    SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP 
                     WHERE chat_id = $4 AND user_id = $5
                     """,
                     activity,
@@ -996,7 +1005,8 @@ class PostgreSQLDatabase:
                 await self.execute_with_retry(
                     "更新用户活动",
                     """
-                    UPDATE users SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP 
+                    UPDATE users 
+                    SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP 
                     WHERE chat_id = $3 AND user_id = $4
                     """,
                     activity,
@@ -1004,17 +1014,17 @@ class PostgreSQLDatabase:
                     chat_id,
                     user_id,
                 )
+
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
             logger.debug(f"✅ 用户活动更新成功: {chat_id}-{user_id} -> {activity}")
 
         except Exception as e:
             logger.error(f"❌ 更新用户活动失败 {chat_id}-{user_id}: {e}")
-            # 🆕 记录更多上下文信息用于调试
             logger.error(
                 f"❌ 失败时的参数 - activity: {activity}, start_time: {start_time}, nickname: {nickname}"
             )
-            raise  # 🆕 重新抛出异常，让调用者知道操作失败
+            raise
 
     async def complete_user_activity(
         self,
