@@ -164,6 +164,30 @@ class MessageFormatter:
 
         return message
 
+    @staticmethod
+    def format_duration(seconds: int) -> str:
+        seconds = int(seconds)
+
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+
+        parts = []
+
+        if h > 0:
+            parts.append(f"{h}小时")
+
+        if m > 0:
+            parts.append(f"{m}分钟")
+
+        if s > 0:
+            parts.append(f"{s}秒")
+
+        if not parts:
+            return "0分钟"
+
+        return "".join(parts)
+
 
 class NotificationService:
     """统一推送服务 - 完整修复版"""
@@ -862,7 +886,7 @@ def get_beijing_time() -> datetime:
 
 def calculate_cross_day_time_diff(
     current_dt: datetime, expected_time: str, checkin_type: str
-) -> Tuple[float, datetime]:
+) -> Tuple[float, int, datetime]:
     """
     智能化的时间差计算（支持跨天和最近匹配）
     """
@@ -885,7 +909,8 @@ def calculate_cross_day_time_diff(
         # 计算时间差（单位：分钟）
         time_diff_minutes = (current_dt - expected_dt).total_seconds() / 60
 
-        return time_diff_minutes, expected_dt
+        time_diff_seconds = int((current_dt - expected_dt).total_seconds())
+        return time_diff_minutes, time_diff_seconds, expected_dt
 
     except Exception as e:
         logger.error(f"时间差计算出错: {e}")
