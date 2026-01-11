@@ -3760,40 +3760,36 @@ async def export_and_push_csv(
 
 # ========== 定时任务 ==========
 async def daily_reset_task():
-    """每日自动重置任务 - 优化修复版"""
+    """每日自动重置任务 - 稳定修复版"""
     logger.info("🚀 每日重置监控任务已启动")
     
     while True:
         now = get_beijing_time()
-        # 调试日志可以保留，但生产环境建议设为 info 或根据需要关闭
         # logger.debug(f"重置任务检查时刻: {now.strftime('%H:%M:%S')}")
 
         try:
-            # 1. 获取所有活跃群组
+            # 1️⃣ 获取所有活跃群组
             all_groups = await db.get_all_groups()
             
             for chat_id in all_groups:
                 try:
                     group_data = await db.get_group_cached(chat_id)
                     reset_hour = group_data.get("reset_hour", Config.DAILY_RESET_HOUR)
-                    # 建议只以小时为准，或者扩大分钟匹配区间
-                    
-                    # 💡 核心修复 1: 使用标记位防止漏重或重复重置
-                    # 检查此群组今天是否在这个小时已经重置过了
+
+                    # 🔑 核心修复: 使用标记位防止重复或漏重
                     reset_flag_key = f"last_reset:{chat_id}:{now.strftime('%Y%m%d')}"
                     last_reset_hour = global_cache.get(reset_flag_key)
 
-                    # 如果当前小时到达了设定的重置小时，且这个小时还没执行过
                     if now.hour == reset_hour and last_reset_hour != now.hour:
-                        logger.info(f"⏰ 群组 {chat_id} 到达重置小时 {reset_hour}，启动强制重置流程...")
+                        logger.info(f"⏰ 群组 {chat_id} 到达重置小时 {reset_hour}，启动重置流程")
 
-                        # 计算业务日期
+                        # 2️⃣ 计算业务日期
                         business_date = now.date()
-                        # 如果是凌晨重置，通常认为是在重置“昨天”的数据
-                        if now.hour < 12: 
+                        if now.hour < 12:
+                            # 如果凌晨，重置前一天的数据
                             business_date = (now - timedelta(days=1)).date()
 
-                        # 🧾 ① 导出备份 (保留你原有的 CSV 导出逻辑)
+                        # 3️⃣ 导出备份 CSV
                         file_name = f"backup_{chat_id}_{business_date.strftime('%Y%m%d')}.csv"
                         try:
                             from utils import export_and_push_csv
@@ -3801,34 +3797,37 @@ async def daily_reset_task():
                         except Exception as e:
                             logger.error(f"导出备份失败: {e}")
 
-                        # 🧹 ② 强制结束该群所有进行中的活动
+                        # 4️⃣ 结束未完成活动
                         completion_result = await db.complete_all_pending_activities_before_reset(chat_id, now)
 
-                        # 🧬 ③ 核心修复 2: 执行数据库强制批量清零
-                        # 不再逐个遍历成员更新，直接一条 SQL 更新该群所有用户
-                        await db.force_reset_all_users_in_group(chat_id, business_date)
+                        # 5️⃣ 强制批量清空用户数据
+                        await db.force_reset_all_users_in_group(chat_id, target_date=business_date)
 
-                        # ⏱️ ④ 清理该群所有定时器
+                        # 6️⃣ 取消该群所有定时器
                         if hasattr(timer_manager, "cancel_all_timers_for_group"):
                             await timer_manager.cancel_all_timers_for_group(chat_id)
 
-                        # 🔔 ⑤ 发送重置通知
-                        from utils import send_reset_notification
-                        await send_reset_notification(chat_id, completion_result, now)
+                        # 7️⃣ 发送重置通知
+                        try:
+                            from utils import send_reset_notification
+                            await send_reset_notification(chat_id, completion_result, now)
+                        except Exception as e:
+                            logger.error(f"发送重置通知失败: {e}")
 
-                        # 📝 ⑥ 标记该小时已处理完成，防止重复触发
-                        global_cache.set(reset_flag_key, now.hour, ttl=7200) 
-                        logger.info(f"✅ 群组 {chat_id} 每日重置任务成功完成")
+                        # 8️⃣ 标记该小时已完成，防止重复触发
+                        global_cache.set(reset_flag_key, now.hour, ttl=7200)
+                        logger.info(f"✅ 群组 {chat_id} 每日重置任务完成")
 
                 except Exception as e:
-                    logger.error(f"❌ 处理群组 {chat_id} 重置时出错: {e}")
+                    logger.error(f"❌ 处理群组 {chat_id} 重置失败: {e}")
                     continue
 
         except Exception as e:
-            logger.error(f"❌ daily_reset_task 核心循环出错: {e}")
+            logger.error(f"❌ daily_reset_task 循环出错: {e}")
 
-        # 每 30 秒检查一次，确保不会错过那一分钟，也不会给服务器太大压力
+        # 每 30 秒检查一次，确保不会错过那一分钟
         await asyncio.sleep(30)
+
 
 
 async def memory_cleanup_task():
