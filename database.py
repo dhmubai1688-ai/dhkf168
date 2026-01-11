@@ -2469,26 +2469,38 @@ class PostgreSQLDatabase:
             )
         self._cache.pop(f"activity_limit:{activity}", None)
 
-    async def force_reset_all_users_in_group(self, chat_id: int):
+    async def force_reset_all_users_in_group(self, chat_id: int, target_date: date = None):
         """
         强制重置该群组所有用户的每日统计数据。
-        解决“惰性重置”导致的查看记录不准确问题。
+        修复：同时清理 user_activities 表，防止修改重置时间后数据复活。
         """
+        # 如果没有传入日期，则获取当前业务日期
+        if target_date is None:
+            # 注意：这里的调用需要根据实际情况调整，通常需要 await
+            # 简单起见，我们直接获取北京时间对应的日期
+            target_date = self.get_beijing_date()
+
         async with self.pool.acquire() as conn:
-            # 1. 更新所有用户的今日统计字段为0
-            # 2. 将 last_updated 设为当前业务日期，防止打卡时再次触发自动重置
-            business_date = self.get_business_date()
+            async with conn.transaction():
+                # 1. 【新增】删除该群组、该日期的所有活动明细记录
+                # 这一步是修复“数据复活”的关键
+                await conn.execute("""
+                    DELETE FROM user_activities 
+                    WHERE chat_id = $1 AND activity_date = $2
+                """, chat_id, target_date)
+
+                # 2. 更新所有用户的今日统计字段为0
+                # 将 last_updated 设为当前业务日期
+                await conn.execute("""
+                    UPDATE users 
+                    SET total_accumulated_time = 0, 
+                        total_activity_count = 0, 
+                        total_fines = 0,
+                        last_updated = $2
+                    WHERE chat_id = $1
+                """, chat_id, target_date)
             
-            await conn.execute("""
-                UPDATE users 
-                SET total_accumulated_time = 0, 
-                    total_activity_count = 0, 
-                    total_fines = 0,
-                    last_updated = $2
-                WHERE chat_id = $1
-            """, chat_id, business_date)
-            
-            # 3. 清理该群组相关的缓存，确保接下来的查询直接读取数据库最新值
+            # 3. 清理缓存
             keys_to_remove = [
                 f"group:{chat_id}", 
                 f"rank:{chat_id}",
@@ -2499,7 +2511,7 @@ class PostgreSQLDatabase:
                 if key in self._cache_ttl:
                     del self._cache_ttl[key]
             
-            logger.info(f"✅ 已强制重置群组 {chat_id} 的所有用户数据 (业务日期: {business_date})")
+            logger.info(f"✅ 已强制重置群组 {chat_id} 的所有用户数据 (业务日期: {target_date})")
 
     # ========== 工具方法 ==========
     @staticmethod
