@@ -2472,25 +2472,33 @@ class PostgreSQLDatabase:
     async def force_reset_all_users_in_group(self, chat_id: int, target_date: date = None):
         """
         强制重置该群组所有用户的每日统计数据。
-        修复：同时清理 user_activities 表，防止修改重置时间后数据复活。
+        修复：同时清理 target_date (昨天) 和 target_date + 1 (今天) 的数据，
+        防止因修改重置时间导致的时间窗口重叠产生“幽灵数据”。
         """
         # 如果没有传入日期，则获取当前业务日期
         if target_date is None:
-            # 注意：这里的调用需要根据实际情况调整，通常需要 await
-            # 简单起见，我们直接获取北京时间对应的日期
             target_date = self.get_beijing_date()
+
+        # 计算下一天（即“今天”），用于清理潜在的重叠数据
+        next_day = target_date + timedelta(days=1)
 
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # 1. 【新增】删除该群组、该日期的所有活动明细记录
-                # 这一步是修复“数据复活”的关键
+                # 1. 删除【结算日】的活动明细
                 await conn.execute("""
                     DELETE FROM user_activities 
                     WHERE chat_id = $1 AND activity_date = $2
                 """, chat_id, target_date)
 
-                # 2. 更新所有用户的今日统计字段为0
-                # 将 last_updated 设为当前业务日期
+                # 2. 【核心修复】删除【新的一天】可能存在的幽灵记录
+                # 这是解决“修改时间后数据复活”的关键
+                await conn.execute("""
+                    DELETE FROM user_activities 
+                    WHERE chat_id = $1 AND activity_date = $2
+                """, chat_id, next_day)
+
+                # 3. 更新所有用户的统计字段为0
+                # 将 last_updated 设为 target_date，这样下次打卡时会触发正常的日期检查
                 await conn.execute("""
                     UPDATE users 
                     SET total_accumulated_time = 0, 
@@ -2500,7 +2508,7 @@ class PostgreSQLDatabase:
                     WHERE chat_id = $1
                 """, chat_id, target_date)
             
-            # 3. 清理缓存
+            # 4. 清理缓存
             keys_to_remove = [
                 f"group:{chat_id}", 
                 f"rank:{chat_id}",
@@ -2511,7 +2519,7 @@ class PostgreSQLDatabase:
                 if key in self._cache_ttl:
                     del self._cache_ttl[key]
             
-            logger.info(f"✅ 已强制重置群组 {chat_id} 的所有用户数据 (业务日期: {target_date})")
+            logger.info(f"✅ 已强制重置群组 {chat_id} (清理日期: {target_date} 及 {next_day})")
 
     # ========== 工具方法 ==========
     @staticmethod
