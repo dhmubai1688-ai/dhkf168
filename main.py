@@ -3904,7 +3904,7 @@ async def daily_reset_task():
                         # 3️⃣ 导出备份 CSV
                         file_name = f"backup_{chat_id}_{business_date.strftime('%Y%m%d')}.csv"
                         try:
-                            from utils import export_and_push_csv
+                            
                             await export_and_push_csv(chat_id, target_date=business_date, file_name=file_name)
                         except Exception as e:
                             logger.error(f"导出备份失败: {e}")
@@ -4494,3 +4494,4 @@ if __name__ == "__main__":
         logger.info("机器人已被用户中断")
     except Exception as e:
         logger.error(f"机器人运行异常: {e}")
+
