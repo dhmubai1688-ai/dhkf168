@@ -150,6 +150,8 @@ class PostgreSQLDatabase:
                     notification_group_id BIGINT,
                     reset_hour INTEGER DEFAULT 0,
                     reset_minute INTEGER DEFAULT 0,
+                    soft_reset_hour INTEGER, 
+                    soft_reset_minute INTEGER,
                     work_start_time TEXT DEFAULT '09:00',
                     work_end_time TEXT DEFAULT '18:00',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -397,14 +399,42 @@ class PostgreSQLDatabase:
 
         # ========== 群组相关操作 ==========
 
-    async def init_group(self, chat_id: int):
-        """初始化群组"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO groups (chat_id) VALUES ($1) ON CONFLICT (chat_id) DO NOTHING",
-                chat_id,
-            )
-            self._cache.pop(f"group:{chat_id}", None)
+    async def init_group(self, chat_id: int, channel_id: int = None, notification_group_id: int = None):
+        """初始化群组记录"""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO groups (
+                        chat_id, 
+                        channel_id, 
+                        notification_group_id, 
+                        reset_hour, 
+                        reset_minute,
+                        soft_reset_hour,      -- 🆕 新增
+                        soft_reset_minute,    -- 🆕 新增
+                        work_start_time, 
+                        work_end_time, 
+                        created_at, 
+                        updated_at
+                    ) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT (chat_id) DO UPDATE SET
+                        updated_at = CURRENT_TIMESTAMP
+                """, 
+                    chat_id, 
+                    channel_id, 
+                    notification_group_id,
+                    Config.DAILY_RESET_HOUR,
+                    Config.DAILY_RESET_MINUTE,
+                    None,  # soft_reset_hour 默认为 NULL
+                    None,  # soft_reset_minute 默认为 NULL
+                    Config.DEFAULT_WORK_HOURS['work_start'],
+                    Config.DEFAULT_WORK_HOURS['work_end']
+                )
+        except Exception as e:
+            logger.error(f"初始化群组失败 {chat_id}: {e}")
+            raise
+
 
     async def get_group(self, chat_id: int) -> Optional[Dict]:
         """获取群组配置"""
@@ -512,41 +542,46 @@ class PostgreSQLDatabase:
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
 
 
+
     async def get_soft_reset_datetime(self, chat_id: int) -> Optional[datetime]:
-        """
-        获取当前软重置周期开始时间点
-        返回：当前软重置周期的开始时间，如果未设置软重置则返回 None
-        """
-        now = self.get_beijing_time()
-
+        """获取当前软重置周期的起点时间"""
         try:
-            group_data = await self.get_group_cached(chat_id)
-            if not group_data:
-                return None
-
-            soft_reset_hour = group_data.get('soft_reset_hour')
-            soft_reset_minute = group_data.get('soft_reset_minute')
-
-            # 如果未设置软重置，返回 None
-            if soft_reset_hour is None or soft_reset_minute is None:
-                return None
-
-            # 计算当前软重置周期开始时间
-            soft_reset_today = now.replace(
-                hour=soft_reset_hour,
-                minute=soft_reset_minute,
-                second=0,
-                microsecond=0
-            )
-
-            # 如果当前时间还没到今天的软重置点，则周期起点是昨天的软重置点
-            if now < soft_reset_today:
-                return soft_reset_today - timedelta(days=1)
-            else:
-                return soft_reset_today
-
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT reset_hour, reset_minute, soft_reset_hour, soft_reset_minute 
+                    FROM groups 
+                    WHERE chat_id = $1
+                    """,
+                    chat_id
+                )
+                
+                if not row:
+                    return None
+                    
+                now = self.get_beijing_time()
+                reset_hour = row["reset_hour"]
+                reset_minute = row["reset_minute"]
+                soft_hour = row["soft_reset_hour"]
+                soft_minute = row["soft_reset_minute"]
+                
+                # 如果没有设置软重置时间，则使用硬重置时间
+                if soft_hour is None or soft_minute is None:
+                    soft_hour = reset_hour
+                    soft_minute = reset_minute
+                
+                # 计算当前软重置周期开始时间
+                soft_reset_today = now.replace(hour=soft_hour, minute=soft_minute, second=0, microsecond=0)
+                
+                if now < soft_reset_today:
+                    # 当前时间还没到今天的软重置点 → 当前周期起点是昨天的软重置时间
+                    return soft_reset_today - timedelta(days=1)
+                else:
+                    # 已经过了今天的软重置点 → 当前周期起点为今天的软重置时间
+                    return soft_reset_today
+                    
         except Exception as e:
-            logger.error(f"❌ 计算软重置时间点失败: {e}")
+            logger.error(f"获取软重置时间失败 {chat_id}: {e}")
             return None
 
 
@@ -626,37 +661,90 @@ class PostgreSQLDatabase:
         return await self.get_user(chat_id, user_id)
 
     async def get_group_cached(self, chat_id: int) -> Optional[Dict]:
-        """带缓存的获取群组配置"""
-        return await self.get_group(chat_id)
+        """获取缓存的群组数据"""
+        cache_key = f"group:{chat_id}"
+        
+        if cache_key in self._cache:
+            cached_data = self._cache[cache_key]
+            if time.time() < self._cache_ttl.get(cache_key, 0):
+                return cached_data
+        
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT 
+                        chat_id,
+                        channel_id,
+                        notification_group_id,
+                        reset_hour,
+                        reset_minute,
+                        soft_reset_hour,      -- 🆕 新增
+                        soft_reset_minute,    -- 🆕 新增
+                        work_start_time,
+                        work_end_time,
+                        created_at,
+                        updated_at
+                    FROM groups 
+                    WHERE chat_id = $1
+                    """,
+                    chat_id
+                )
+                
+                if row:
+                    group_data = dict(row)
+                    self._cache[cache_key] = group_data
+                    self._cache_ttl[cache_key] = time.time() + self.CACHE_TTL
+                    return group_data
+                else:
+                    # 如果不存在，初始化群组
+                    await self.init_group(chat_id)
+                    return await self.get_group_cached(chat_id)
+                    
+        except Exception as e:
+            logger.error(f"获取群组缓存失败 {chat_id}: {e}")
+            return None
 
     async def update_user_activity(
-        self,
-        chat_id: int,
-        user_id: int,
-        activity: str,
-        start_time: str,
-        nickname: str = None,
+        self, 
+        chat_id: int, 
+        user_id: int, 
+        activity: str, 
+        start_time: str, 
+        nickname: str = None
     ):
         """更新用户活动状态"""
-        async with self.pool.acquire() as conn:
-            if nickname:
-                await conn.execute(
-                    "UPDATE users SET current_activity = $1, activity_start_time = $2, nickname = $3, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $4 AND user_id = $5",
-                    activity,
-                    start_time,
-                    nickname,
-                    chat_id,
-                    user_id,
-                )
-            else:
-                await conn.execute(
-                    "UPDATE users SET current_activity = $1, activity_start_time = $2, updated_at = CURRENT_TIMESTAMP WHERE chat_id = $3 AND user_id = $4",
-                    activity,
-                    start_time,
-                    chat_id,
-                    user_id,
-                )
+        try:
+            now = self.get_beijing_time()
+            today_date = now.date()
+            
+            async with self.pool.acquire() as conn:
+                # 如果用户不存在，先初始化
+                await conn.execute("""
+                    INSERT INTO users (chat_id, user_id, nickname, created_at, updated_at, activity_date)
+                    VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $4)
+                    ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                        nickname = COALESCE($3, users.nickname),
+                        updated_at = CURRENT_TIMESTAMP
+                """, chat_id, user_id, nickname, today_date)
+                
+                # 更新活动状态
+                await conn.execute("""
+                    UPDATE users 
+                    SET current_activity = $1, 
+                        activity_start_time = $2,
+                        activity_date = $3,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE chat_id = $4 AND user_id = $5
+                """, activity, start_time, today_date, chat_id, user_id)
+            
+            # 清理缓存
             self._cache.pop(f"user:{chat_id}:{user_id}", None)
+            return True
+            
+        except Exception as e:
+            logger.error(f"更新用户活动失败 {chat_id}-{user_id}: {e}")
+            return False
 
 
     async def complete_user_activity(
@@ -2695,17 +2783,25 @@ class PostgreSQLDatabase:
             return limit
 
     async def get_current_activity_users(self, chat_id: int, activity: str) -> int:
-        """获取当前正在进行指定活动的用户数量"""
-        async with self.pool.acquire() as conn:
-            count = await conn.fetchval(
-                """
-                SELECT COUNT(*) FROM users 
-                WHERE chat_id = $1 AND current_activity = $2
-            """,
-                chat_id,
-                activity,
-            )
-            return count or 0
+        """获取当前进行指定活动的用户数量"""
+        try:
+            today = self.get_beijing_time().date()  # 这返回一个 date 对象
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM users 
+                    WHERE chat_id = $1 
+                    AND current_activity = $2 
+                    AND activity_date = $3
+                    """,
+                    chat_id,
+                    activity,
+                    today  # 这里应该是 date 对象，不是字符串
+                )
+                return result or 0
+        except Exception as e:
+            logger.error(f"获取活动用户数量失败 {chat_id}-{activity}: {e}")
+            return 0
 
     async def remove_activity_user_limit(self, activity: str):
         """移除活动人数限制"""
