@@ -1897,7 +1897,7 @@ async def cmd_setsoftreset(message: types.Message):
             )
             return
         
-        # 更新数据库
+        # 更新数据库 - 使用正确的字段名
         async with db.pool.acquire() as conn:
             await conn.execute(
                 """
