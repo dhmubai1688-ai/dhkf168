@@ -711,13 +711,27 @@ async def can_perform_activities(
         if shift_state:
             current_shift = shift_state.get("current_shift", "day")
         else:
-            # 没有活跃班次，允许活动（单班模式）
+            shift_config = await db.get_shift_config(chat_id)
+            if shift_config.get("dual_mode", False):
+                # 双班模式下如果没有活跃班次，允许活动（还没人打上班卡）
+                return True, ""
             return True, ""
 
-    # 获取今天的业务日期
-    today = await db.get_business_date(chat_id)
+    # 🎯 关键修复：使用与上班打卡相同的日期判定逻辑
+    now = get_beijing_time()
+    shift_info = await db.determine_shift_for_time(
+        chat_id=chat_id,
+        current_time=now,
+        checkin_type="work_start",  # 活动跟随上班班次
+    )
+    
+    if not shift_info:
+        shift_text = "白班" if current_shift == "day" else "夜班"
+        return False, f"❌ 当前不在{shift_text}活动时段"
+    
+    record_date = shift_info.get("record_date")
+    logger.info(f"📅 [活动检查] 用户={uid}, 班次={current_shift}, 记录日期={record_date}")
 
-    # 查询用户在当前班次是否有上班记录
     async with db.pool.acquire() as conn:
         # 检查当前班次是否已上班
         has_work_start = await conn.fetchval(
@@ -732,12 +746,13 @@ async def can_perform_activities(
             """,
             chat_id,
             uid,
-            today,
+            record_date,
             current_shift,
         )
 
         if not has_work_start:
             shift_text = "白班" if current_shift == "day" else "夜班"
+            logger.warning(f"❌ [活动检查] 用户={uid} 未打{shift_text}上班卡，日期={record_date}")
             return False, f"❌ 请先打{shift_text}上班卡！"
 
         # 检查当前班次是否已下班
@@ -753,7 +768,7 @@ async def can_perform_activities(
             """,
             chat_id,
             uid,
-            today,
+            record_date,
             current_shift,
         )
 
@@ -761,6 +776,7 @@ async def can_perform_activities(
             shift_text = "白班" if current_shift == "day" else "夜班"
             return False, f"❌ 您本{shift_text}已下班，无法进行活动！"
 
+    logger.info(f"✅ [活动检查] 用户={uid} 允许执行活动")
     return True, ""
 
 
