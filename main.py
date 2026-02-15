@@ -2079,19 +2079,28 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 return
 
             # ========== 🎯 计算迟到/罚款 ==========
-            # 根据班次选择期望的上班时间
+            # 根据班次选择期望的上班时间（固定的，不是当前时间）
             if shift == "night":
                 # 夜班上班期望时间是 21:00（白班结束时间）
                 expected_time = shift_config.get("day_end", "21:00")
+                # 夜班上班的期望日期是今天
+                expected_date = record_date  # 夜班上班归今天
             else:
                 # 白班上班期望时间是 09:00
                 expected_time = work_hours["work_start"]
+                expected_date = record_date
 
-            time_diff_minutes, time_diff_seconds, expected_dt = (
-                calculate_cross_day_time_diff(
-                    now, expected_time, "work_start", record_date=record_date
-                )
-            )
+            # 构建期望的datetime对象（使用固定的期望时间）
+            expected_hour, expected_minute = map(int, expected_time.split(":"))
+            expected_dt = datetime.combine(
+                expected_date, 
+                time(expected_hour, expected_minute)
+            ).replace(tzinfo=now.tzinfo)
+
+            # 计算时间差（用当前时间 - 期望时间）
+            time_diff_seconds = int((now - expected_dt).total_seconds())
+            time_diff_minutes = time_diff_seconds / 60
+
 
             fine_amount = 0
             status = "✅ 准时"
@@ -2241,19 +2250,28 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 return
 
             # ========== 🎯 计算早退/罚款 ==========
-            # 根据班次选择期望的下班时间
+            # 下班打卡的期望时间计算
             if shift == "night":
                 # 夜班下班期望时间是 09:00（第二天早上）
-                expected_time = work_hours["work_start"]  # 第二天早上9点
+                expected_time = work_hours["work_start"]
+                # 夜班下班的期望日期是第二天
+                expected_date = record_date + timedelta(days=1)  # 跨天
             else:
                 # 白班下班期望时间是 18:00
                 expected_time = work_hours["work_end"]
+                expected_date = record_date
 
-            time_diff_minutes, time_diff_seconds, expected_dt = (
-                calculate_cross_day_time_diff(
-                    now, expected_time, "work_end", record_date=record_date
-                )
-            )
+            # 构建期望的datetime对象
+            expected_hour, expected_minute = map(int, expected_time.split(":"))
+            expected_dt = datetime.combine(
+                expected_date,
+                time(expected_hour, expected_minute)
+            ).replace(tzinfo=now.tzinfo)
+
+            # 计算时间差
+            time_diff_seconds = int((now - expected_dt).total_seconds())
+            time_diff_minutes = time_diff_seconds / 60
+
 
             fine_amount = 0
             status = "✅ 准时"
