@@ -2082,22 +2082,22 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 parse_mode="HTML",
             )
 
-            # 智能通知
-            if is_late_early:
-                await send_work_notification(
-                    chat_id,
-                    uid,
-                    name,
-                    current_time,
-                    expected_dt,
-                    action_text,
-                    status_type,
-                    fine_amount,
-                    trace_id,
-                )
+            # ✅ 发送通知（准时/迟到都发）
+            await send_work_notification(
+                chat_id,
+                uid,
+                name,
+                current_time,
+                expected_dt,
+                action_text,
+                status_type if is_late_early else "准时",  # 准时传入"准时"
+                fine_amount,
+                trace_id,
+            )
 
             logger.info(f"✅[{trace_id}] {shift_text}{action_text}打卡流程完成")
             return
+
 
         # ========== 2. 下班打卡 ==========
         elif checkin_type == "work_end":
@@ -2262,6 +2262,25 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 parse_mode="HTML",
             )
 
+            # ========== 发送成功消息 ==========
+            result_msg = (
+                f"{emoji_status} <b>{shift_text}{action_text}完成</b>\n"
+                f"👤 用户：{MessageFormatter.format_user_link(uid, name)}\n"
+                f"⏰ {action_text}时间：<code>{current_time}</code>\n"
+                f"📅 期望时间：<code>{expected_dt.strftime('%m/%d %H:%M')}</code>\n"
+                f"📊 状态：{status}"
+            )
+
+            if activity_auto_ended and current_activity:
+                result_msg += f"\n\n🔄 检测到未结束活动 <code>{current_activity}</code>，已自动结束"
+
+            await message.answer(
+                result_msg,
+                reply_markup=await get_main_keyboard(chat_id, await is_admin_task),
+                reply_to_message_id=message.message_id,
+                parse_mode="HTML",
+            )
+
             # ========== 班次状态清理（仅双班模式）==========
             if is_dual_mode:
                 try:
@@ -2300,22 +2319,26 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 except Exception as e:
                     logger.error(f"❌ [班次状态] 检查剩余用户失败 {chat_id}: {e}")
 
-            # 智能通知
-            if is_late_early:
-                await send_work_notification(
-                    chat_id,
-                    uid,
-                    name,
-                    current_time,
-                    expected_dt,
-                    action_text,
-                    status_type,
-                    fine_amount,
-                    trace_id,
-                )
+            # ✅ 发送通知（准时/早退/加班都发）
+            status_display = status_type if is_late_early else "准时"
+            if time_diff_seconds > 0 and action_text == "下班":  # 加班情况
+                status_display = "加班"
+                
+            await send_work_notification(
+                chat_id,
+                uid,
+                name,
+                current_time,
+                expected_dt,
+                action_text,
+                status_display,
+                fine_amount,
+                trace_id,
+            )
 
             logger.info(f"✅[{trace_id}] {shift_text}{action_text}打卡流程完成")
             return
+
 
 
 async def _check_shift_work_record(
