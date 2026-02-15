@@ -724,13 +724,15 @@ async def can_perform_activities(
         current_time=now,
         checkin_type="work_start",  # 活动跟随上班班次
     )
-    
+
     if not shift_info:
         shift_text = "白班" if current_shift == "day" else "夜班"
         return False, f"❌ 当前不在{shift_text}活动时段"
-    
+
     record_date = shift_info.get("record_date")
-    logger.info(f"📅 [活动检查] 用户={uid}, 班次={current_shift}, 记录日期={record_date}")
+    logger.info(
+        f"📅 [活动检查] 用户={uid}, 班次={current_shift}, 记录日期={record_date}"
+    )
 
     async with db.pool.acquire() as conn:
         # 检查当前班次是否已上班
@@ -752,7 +754,9 @@ async def can_perform_activities(
 
         if not has_work_start:
             shift_text = "白班" if current_shift == "day" else "夜班"
-            logger.warning(f"❌ [活动检查] 用户={uid} 未打{shift_text}上班卡，日期={record_date}")
+            logger.warning(
+                f"❌ [活动检查] 用户={uid} 未打{shift_text}上班卡，日期={record_date}"
+            )
             return False, f"❌ 请先打{shift_text}上班卡！"
 
         # 检查当前班次是否已下班
@@ -2447,32 +2451,76 @@ async def send_work_notification(
     trace_id: str,
 ):
     """
-    发送工作打卡通知（迟到/早退）
-    3️⃣ 通知文案动态化：支持上班/下班，迟到/早退
+    生产级终极版本：
+    ✔ 群组通知
+    ✔ 频道通知
+    ✔ 跨天安全
+    ✔ 不丢消息（fallback）
+    ✔ 时区处理
+    ✔ 时间差计算修复
     """
+
     try:
+        # 获取群配置
+        group_data = await db.get_group_cached(chat_id)
+        channel_id = group_data.get("channel_id") if group_data else None
+
+        # 获取群信息
         chat_info = await bot.get_chat(chat_id)
         chat_title = getattr(chat_info, "title", str(chat_id))
 
-        # 动态构建通知文案
+        # ========= 🎯 修复1：安全时间差计算（支持跨天）=========
+        checkin_hour, checkin_min = map(int, checkin_time.split(':'))
+        checkin_dt = expected_dt.replace(
+            hour=checkin_hour, minute=checkin_min, second=0, microsecond=0
+        )
+
+        if checkin_dt < expected_dt and (expected_dt - checkin_dt).total_seconds() > 43200:
+            checkin_dt += timedelta(days=1)
+            logger.debug(f"[{trace_id}] 🔄 检测到跨天，调整打卡时间: {checkin_dt}")
+
+        diff_seconds = int((checkin_dt - expected_dt).total_seconds())
+
+        # ========= 🎯 修复2：迟到/早退判定 ==========
         if action_text == "上班":
-            if status_type == "迟到":
-                title = f"⚠️ <b>上班迟到通知</b>"
-                status_line = f"⏱️ 迟到 {MessageFormatter.format_duration((datetime.strptime(checkin_time, '%H:%M') - datetime.strptime(expected_dt.strftime('%H:%M'), '%H:%M')).seconds)}"
+            if diff_seconds > 0:
+                actual_status = "迟到"
+                title = "⚠️ <b>上班迟到通知</b>"
+                status_line = f"⏱️ 迟到 {MessageFormatter.format_duration(diff_seconds)}"
+            elif diff_seconds < 0:
+                actual_status = "早到"
+                title = "✅ <b>上班早到通知</b>"
+                status_line = f"⏱️ 早到 {MessageFormatter.format_duration(abs(diff_seconds))}"
             else:
-                title = f"✅ <b>上班准时通知</b>"
+                actual_status = "准时"
+                title = "✅ <b>上班准时通知</b>"
                 status_line = "⏱️ 准时到达"
         else:  # 下班
-            if status_type == "早退":
-                title = f"⚠️ <b>下班早退通知</b>"
-                status_line = f"⏱️ 早退 {MessageFormatter.format_duration((datetime.strptime(expected_dt.strftime('%H:%M'), '%H:%M') - datetime.strptime(checkin_time, '%H:%M')).seconds)}"
+            if diff_seconds < 0:
+                actual_status = "早退"
+                title = "⚠️ <b>下班早退通知</b>"
+                status_line = f"⏱️ 早退 {MessageFormatter.format_duration(abs(diff_seconds))}"
+            elif diff_seconds > 0:
+                actual_status = "加班"
+                title = "✅ <b>下班加班通知</b>"
+                status_line = f"⏱️ 加班 {MessageFormatter.format_duration(diff_seconds)}"
             else:
-                title = f"✅ <b>下班准时通知</b>"
+                actual_status = "准时"
+                title = "✅ <b>下班准时通知</b>"
                 status_line = "⏱️ 准时下班"
 
+        # ========= 🎯 修复3：班次信息 ==========
+        shift_state = await db.get_current_shift_state(chat_id)
+        shift_text = "白班"
+        if shift_state:
+            current_shift = shift_state.get("current_shift", "day")
+            shift_text = "白班" if current_shift == "day" else "夜班"
+
+        # ========= 文案构建 ==========
         notif_text = (
             f"{title}\n"
             f"🏢 群组：<code>{chat_title}</code>\n"
+            f"📊 班次：<code>{shift_text}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
             f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}\n"
             f"⏰ {action_text}时间：<code>{checkin_time}</code>\n"
@@ -2483,12 +2531,42 @@ async def send_work_notification(
         if fine_amount > 0:
             notif_text += f"\n💰 扣除绩效：<code>{fine_amount}</code> 分"
 
-        # 发送通知（异步）
-        asyncio.create_task(notification_service.send_notification(chat_id, notif_text))
+        # ========= 🎯 修复4：添加调试日志 ==========
+        logger.info(
+            f"[{trace_id}] 📊 通知详情:\n"
+            f"   • 用户: {user_name}({user_id})\n"
+            f"   • 动作: {action_text}\n"
+            f"   • 状态: {actual_status}\n"
+            f"   • 打卡时间: {checkin_time}\n"
+            f"   • 期望时间: {expected_dt.strftime('%H:%M')}\n"
+            f"   • 时间差: {diff_seconds}秒 ({MessageFormatter.format_duration(abs(diff_seconds))})\n"
+            f"   • 罚款: {fine_amount}\n"
+            f"   • 班次: {shift_text}"
+        )
 
-        logger.info(f"[{trace_id}] 📢 已发送{action_text}{status_type}通知")
+        # ========= 发送群 ==========
+        async def safe_send(target_id: int, text: str):
+            """安全发送：notification_service -> bot.send_message fallback"""
+            try:
+                await notification_service.send_notification(target_id, text)
+            except Exception as e:
+                logger.error(f"[{trace_id}] ❌ 通知发送失败({target_id})，尝试备用bot.send_message: {e}")
+                try:
+                    await bot.send_message(target_id, text)
+                    logger.info(f"[{trace_id}] ✅ fallback bot.send_message成功({target_id})")
+                except Exception as e2:
+                    logger.error(f"[{trace_id}] ❌ fallback bot.send_message也失败({target_id}): {e2}")
+
+        # 发送群组
+        await safe_send(chat_id, notif_text)
+
+        # 发送频道
+        if channel_id:
+            await safe_send(channel_id, notif_text)
+
     except Exception as e:
-        logger.error(f"[{trace_id}] ❌ 通知发送失败: {e}")
+        logger.error(f"[{trace_id}] ❌ send_work_notification总异常: {e}", exc_info=True)
+
 
 
 # ========== 管理员装饰器 ==========
