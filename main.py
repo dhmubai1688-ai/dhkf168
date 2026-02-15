@@ -11,7 +11,8 @@ import gc
 import aiohttp
 import traceback
 from functools import wraps
-from datetime import datetime, timedelta, date,time
+from datetime import datetime, timedelta, date
+from datetime import time as dt_time
 from typing import Dict, Optional, List
 from contextlib import suppress
 from datetime import timedelta
@@ -2093,14 +2094,13 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             # 构建期望的datetime对象（使用固定的期望时间）
             expected_hour, expected_minute = map(int, expected_time.split(":"))
             expected_dt = datetime.combine(
-                expected_date, 
-                time(expected_hour, expected_minute)
+                expected_date, dt_time(expected_hour, expected_minute)  # ✅ 将 time 改为 dt_time
             ).replace(tzinfo=now.tzinfo)
+
 
             # 计算时间差（用当前时间 - 期望时间）
             time_diff_seconds = int((now - expected_dt).total_seconds())
             time_diff_minutes = time_diff_seconds / 60
-
 
             fine_amount = 0
             status = "✅ 准时"
@@ -2264,14 +2264,13 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
             # 构建期望的datetime对象
             expected_hour, expected_minute = map(int, expected_time.split(":"))
             expected_dt = datetime.combine(
-                expected_date,
-                time(expected_hour, expected_minute)
+                expected_date, dt_time(expected_hour, expected_minute)  # ✅ 将 time 改为 dt_time
             ).replace(tzinfo=now.tzinfo)
+
 
             # 计算时间差
             time_diff_seconds = int((now - expected_dt).total_seconds())
             time_diff_minutes = time_diff_seconds / 60
-
 
             fine_amount = 0
             status = "✅ 准时"
