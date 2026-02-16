@@ -2582,13 +2582,13 @@ async def send_work_notification(
                 status_line = f"⏱️ 迟到 {MessageFormatter.format_duration(diff_seconds)}"
             elif diff_seconds < 0:
                 actual_status = "早到"
-                title = "✅ <b>上班早到通知</b>"
+                title = "✅ <b>上班通知</b>"
                 status_line = (
                     f"⏱️ 早到 {MessageFormatter.format_duration(abs(diff_seconds))}"
                 )
             else:
                 actual_status = "准时"
-                title = "✅ <b>上班准时通知</b>"
+                title = "✅ <b>上班通知</b>"
                 status_line = "⏱️ 准时到达"
         else:  # 下班
             if diff_seconds < 0:
@@ -2599,7 +2599,7 @@ async def send_work_notification(
                 )
             elif diff_seconds > 0:
                 actual_status = "加班"
-                title = "✅ <b>下班加班通知</b>"
+                title = "✅ <b>下班通知</b>"
                 status_line = f"⏱️ 加班 {MessageFormatter.format_duration(diff_seconds)}"
             else:
                 actual_status = "准时"
@@ -2616,8 +2616,7 @@ async def send_work_notification(
         # ========= 文案构建 ==========
         notif_text = (
             f"{title}\n"
-            f"🏢 群组：<code>{chat_title}</code>\n"
-            f"📊 班次：<code>{shift_text}</code>\n"
+            f"🏢 群组/班次：<code>{chat_title}</code> <code>{shift_text}</code>\n"
             f"{MessageFormatter.create_dashed_line()}\n"
             f"👤 用户：{MessageFormatter.format_user_link(user_id, user_name)}\n"
             f"⏰ {action_text}时间：<code>{checkin_time}</code>\n"
@@ -6009,7 +6008,7 @@ async def export_and_push_csv(
             f"📅 统计日期：<code>{display_date}</code>\n"
             f"⏰ 导出时间：<code>{beijing_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
             f"{dashed_line}\n"
-            f"💾 <i>包含每个用户每日的活动统计及工作时长</i>"
+            f"💾 包含每个用户每日的活动统计及工作时长"
         )
 
         # ========== 12. 发送到当前群组 ==========
