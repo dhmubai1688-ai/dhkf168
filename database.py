@@ -3819,6 +3819,49 @@ class PostgreSQLDatabase:
             logger.error(f"清理过期班次状态失败: {e}")
             return 0
 
+    # ========== 用户当前班次辅助方法 ==========
+    async def get_user_active_shift(self, chat_id: int, user_id: int) -> Optional[Dict]:
+        """
+        获取用户当前活跃的班次（任意班次）
+        用于快速判断用户是否有进行中的班次
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT shift, record_date, shift_start_time
+                    FROM group_shift_state
+                    WHERE chat_id = $1 AND user_id = $2
+                    ORDER BY shift_start_time DESC
+                    LIMIT 1
+                    """,
+                    chat_id,
+                    user_id,
+                )
+                return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"获取用户活跃班次失败: {e}")
+            return None
+
+    async def count_active_users_in_shift(self, chat_id: int, shift: str) -> int:
+        """
+        统计指定班次中的活跃用户数
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM group_shift_state
+                    WHERE chat_id = $1 AND shift = $2
+                    """,
+                    chat_id,
+                    shift,
+                )
+                return count or 0
+        except Exception as e:
+            logger.error(f"统计班次活跃用户失败: {e}")
+            return 0
+
     async def update_group_dual_mode(
         self, chat_id: int, enabled: bool, day_start: str = None, day_end: str = None
     ):
