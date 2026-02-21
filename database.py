@@ -1423,18 +1423,24 @@ class PostgreSQLDatabase:
         fine_amount: int = 0,
         is_overtime: bool = False,
         shift: Optional[str] = None,
-        forced_date: Optional[date] = None,  # 🆕 新增参数
+        forced_date: Optional[date] = None,
     ) -> None:
         """完成用户活动 - 支持班次、软重置、统计、超时、罚款"""
 
         # ===== 1️⃣ 班次处理 =====
-        shift_state = await self.get_user_shift_state(chat_id, user_id, shift)
+        # 如果外部没有传入 shift，尝试从用户状态获取
         if shift is None:
-            if shift_state:
-                shift = shift_state.get("current_shift")
+            # 获取用户当前的班次状态
+            user_shift_state = await self.get_user_active_shift(chat_id, user_id)
+            if user_shift_state:
+                shift = user_shift_state["shift"]  # ✅ 直接从字典获取 shift 字段
+                logger.debug(f"📅 从用户班次状态获取班次: {shift}")
             else:
+                # 降级使用时间判定
                 now = self.get_beijing_time()
-                shift = await self.determine_shift_for_time(chat_id, now) or "day"
+                shift_info = await self.determine_shift_for_time(chat_id, now)
+                shift = shift_info.get("shift", "day") if shift_info else "day"
+                logger.debug(f"📅 降级使用时间判定班次: {shift}")
 
         # ===== 2️⃣ 时间计算 =====
         # 🎯 确定目标日期
@@ -1460,7 +1466,7 @@ class PostgreSQLDatabase:
 
                 # ===== 3️⃣ 软重置判断（只有非强制日期才检查）=====
                 current_soft_reset = False
-                if not forced_date:  # 🆕 只有非强制日期才检查软重置
+                if not forced_date:
                     has_soft_reset_record = await conn.fetchval(
                         """
                         SELECT EXISTS (
@@ -1546,7 +1552,6 @@ class PostgreSQLDatabase:
                 )
 
                 # ===== 6️⃣ daily_statistics =====
-                # 强制日期时，软重置标志始终为 False
                 soft_reset_flag = current_soft_reset if not forced_date else False
 
                 await conn.execute(
@@ -1764,6 +1769,7 @@ class PostgreSQLDatabase:
             f"罚款: {fine_amount}, 超时: {is_overtime} {overtime_seconds}s, "
             f"软重置: {current_soft_reset}, 班次: {shift})"
         )
+
 
     # ========= 重置前批量完成所有未结束活动 =========
     async def complete_all_pending_activities_before_reset(
