@@ -1059,8 +1059,11 @@ class PostgreSQLDatabase:
 
     async def get_user(self, chat_id: int, user_id: int) -> Optional[Dict]:
         cache_key = f"user:{chat_id}:{user_id}"
-        cached = self._get_cached(cache_key)
+        
+        # 🚨 修改点1：使用异步方法 aget 而不是 _get_cached
+        cached = await global_cache.aget(cache_key)
         if cached is not None:
+            logger.debug(f"从缓存获取用户: {user_id}")
             return cached
 
         row = await self.execute_with_retry(
@@ -1081,7 +1084,8 @@ class PostgreSQLDatabase:
 
         if row:
             result = dict(row)
-            self._set_cached(cache_key, result, 30)
+            # 🚨 修改点2：使用异步方法 aset 而不是 _set_cached
+            await global_cache.aset(cache_key, result, 30)
             return result
         return None
 
