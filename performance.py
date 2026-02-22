@@ -229,8 +229,11 @@ class GlobalCache:
 
     async def aset(self, key: str, value: Any, ttl: int = None):
         """异步设置缓存值"""
-        # 设置内存缓存
-        self.set(key, value, ttl)
+        # 设置内存缓存 (直接写，不调用 self.set)
+        if ttl is None:
+            ttl = self.default_ttl
+        self._memory_cache[key] = value
+        self._memory_ttl[key] = time.time() + ttl
 
         # 如果启用Redis，也设置到Redis
         if self.use_redis:
@@ -246,9 +249,11 @@ class GlobalCache:
 
         # 删除内存缓存
         for key in keys:
-            self._memory_cache.pop(key, None)
-            self._memory_ttl.pop(key, None)
-            deleted += 1
+            if self._memory_cache.pop(key, None) is not None:
+                self._memory_ttl.pop(key, None)
+                deleted += 1
+            else:
+                self._memory_ttl.pop(key, None)
 
         # 删除Redis缓存
         if self.use_redis:
@@ -497,7 +502,7 @@ performance_monitor = PerformanceMonitor()
 retry_manager = RetryManager(max_retries=3, base_delay=1.0)
 global_cache = GlobalCache(default_ttl=300)
 task_manager = TaskManager()
-message_deduplicate = MessageDeduplicate(ttl=60)
+global_msg_deduplicate = MessageDeduplicate(ttl=60)
 
 
 # 便捷装饰器
