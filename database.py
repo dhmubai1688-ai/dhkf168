@@ -885,7 +885,7 @@ class PostgreSQLDatabase:
             "INSERT INTO groups (chat_id) VALUES ($1) ON CONFLICT (chat_id) DO NOTHING",
             chat_id,
         )
-        self._cache.pop(f"group:{chat_id}", None)
+        await self.invalidate_cache(f"group:{chat_id}")
 
     async def get_group(self, chat_id: int) -> Optional[Dict]:
         """获取群组配置 - Redis优化版"""
@@ -921,7 +921,7 @@ class PostgreSQLDatabase:
                 channel_id,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def update_group_notification(self, chat_id: int, group_id: int):
         """更新群组通知群组ID"""
@@ -932,7 +932,7 @@ class PostgreSQLDatabase:
                 group_id,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def update_group_reset_time(self, chat_id: int, hour: int, minute: int):
         """更新群组重置时间"""
@@ -944,7 +944,7 @@ class PostgreSQLDatabase:
                 minute,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def update_group_work_time(
         self, chat_id: int, work_start: str, work_end: str
@@ -958,7 +958,7 @@ class PostgreSQLDatabase:
                 work_end,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     # ========== 群组相关操作 - 添加新方法 ==========
     async def update_group_extra_work_group(
@@ -977,7 +977,7 @@ class PostgreSQLDatabase:
                 extra_work_group_id,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def get_extra_work_group(self, chat_id: int) -> Optional[int]:
         """获取额外的上下班通知群组ID"""
@@ -997,7 +997,7 @@ class PostgreSQLDatabase:
                 """,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def get_group_work_time(self, chat_id: int) -> Dict[str, str]:
         """获取群组上下班时间 - 带重试"""
@@ -1042,7 +1042,7 @@ class PostgreSQLDatabase:
             nickname,
             today,
         )
-        self._cache.pop(f"user:{chat_id}:{user_id}", None)
+        await self.invalidate_cache(f"user:{chat_id}:{user_id}")
 
     async def update_user_last_updated(
         self, chat_id: int, user_id: int, update_date: date
@@ -1059,7 +1059,7 @@ class PostgreSQLDatabase:
 
     async def get_user(self, chat_id: int, user_id: int) -> Optional[Dict]:
         cache_key = f"user:{chat_id}:{user_id}"
-        
+
         # 🚨 修改点1：使用异步方法 aget 而不是 _get_cached
         cached = await global_cache.aget(cache_key)
         if cached is not None:
@@ -1322,7 +1322,7 @@ class PostgreSQLDatabase:
                 )
 
             # 清理缓存
-            self._cache.pop(f"user:{chat_id}:{user_id}", None)
+            await self.invalidate_cache(f"user:{chat_id}:{user_id}")
 
             logger.debug(
                 f"✅ 用户活动更新成功: {chat_id}-{user_id} -> {activity}（班次: {shift}）"
@@ -1377,7 +1377,7 @@ class PostgreSQLDatabase:
                 chat_id,
                 user_id,
             )
-        self._cache.pop(f"user:{chat_id}:{user_id}", None)
+        await self.invalidate_cache(f"user:{chat_id}:{user_id}")
 
     # ====== 核心业务方法 ======
     async def complete_user_activity(
@@ -1725,7 +1725,7 @@ class PostgreSQLDatabase:
                 await conn.execute(query, *params)
 
         # ===== 9️⃣ 清理缓存 =====
-        self._cache.pop(f"user:{chat_id}:{user_id}", None)
+        await self.invalidate_cache(f"user:{chat_id}:{user_id}")
         self._cache_ttl.pop(f"user:{chat_id}:{user_id}", None)
 
         date_source = "强制日期" if forced_date else "业务日期"
@@ -2187,7 +2187,7 @@ class PostgreSQLDatabase:
                 minute,
                 chat_id,
             )
-            self._cache.pop(f"group:{chat_id}", None)
+            await self.invalidate_cache(f"group:{chat_id}")
 
     async def get_group_soft_reset_time(self, chat_id: int) -> tuple[int, int]:
         """获取群组软重置时间"""
@@ -2603,7 +2603,7 @@ class PostgreSQLDatabase:
                     )
 
         # ========= 8. 清理缓存 =========
-        self._cache.pop(f"user:{chat_id}:{user_id}", None)
+        await self.invalidate_cache(f"user:{chat_id}:{user_id}")
 
         logger.debug(
             f"✅ [四表同步完成] 用户:{user_id} | 业务日期:{business_date} | "
@@ -2797,7 +2797,7 @@ class PostgreSQLDatabase:
                 max_times,
                 time_limit,
             )
-        self._cache.pop("activity_limits", None)
+        await self.invalidate_cache("activity_limits")
 
     async def delete_activity_config(self, activity: str):
         """删除活动配置"""
@@ -2809,7 +2809,7 @@ class PostgreSQLDatabase:
             await conn.execute(
                 "DELETE FROM fine_configs WHERE activity_name = $1", activity
             )
-        self._cache.pop("activity_limits", None)
+        await self.invalidate_cache("activity_limits")
 
     # ========== 罚款配置操作 ==========
     async def get_fine_rates(self) -> Dict:
@@ -2994,7 +2994,7 @@ class PostgreSQLDatabase:
                 key,
                 1 if value else 0,
             )
-        self._cache.pop("push_settings", None)
+        await self.invalidate_cache("push_settings")
 
     # ========== 统计和导出相关 ==========
 
@@ -3877,7 +3877,7 @@ class PostgreSQLDatabase:
             day_end if enabled else None,
             chat_id,
         )
-        self._cache.pop(f"group:{chat_id}", None)
+        await self.invalidate_cache(f"group:{chat_id}")
 
     async def update_shift_grace_window(
         self, chat_id: int, grace_before: int, grace_after: int
@@ -3896,7 +3896,7 @@ class PostgreSQLDatabase:
             grace_after,
             chat_id,
         )
-        self._cache.pop(f"group:{chat_id}", None)
+        await self.invalidate_cache(f"group:{chat_id}")
 
     async def get_shift_config(self, chat_id: int) -> Dict:
         """获取班次配置（包含分离的上下班时间窗口）"""
