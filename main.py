@@ -7744,6 +7744,11 @@ async def daily_reset_task():
 
         natural_today = now.date()
 
+        if natural_today.day == 1:
+            reset_hour = 15
+            reset_minute = 0
+            logger.info(f"📅 [每月1号] 使用特殊重置时间: 15:00")
+
         # ===== 2. 计算执行时间 =====
         reset_time_today = datetime.combine(
             natural_today, dt_time(reset_hour, reset_minute)  # ✅ 更简洁
