@@ -6927,23 +6927,29 @@ async def export_and_push_csv(
         input_file = FSInputFile(temp_file, filename=file_name)
         send_to_group_success = False
 
-        try:
-            success = await bot_manager.send_document_with_retry(
-                chat_id=chat_id,
-                document=input_file,
-                caption=caption,
-                parse_mode="HTML",
-            )
-            if success:
-                send_to_group_success = True
-                logger.info(f"✅ [{operation_id}] CSV文件已发送到群组 {chat_id}")
-            else:
-                logger.error(f"❌ [{operation_id}] bot_manager 发送文档失败")
-        except Exception as e:
-            logger.error(f"❌ [{operation_id}] 发送到群组失败: {e}")
-            await bot_manager.send_message_with_retry(
-                chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
-            )
+        # ===== 新增：根据 push_file 参数决定是否发送 =====
+        if push_file:
+            try:
+                success = await bot_manager.send_document_with_retry(
+                    chat_id=chat_id,
+                    document=input_file,
+                    caption=caption,
+                    parse_mode="HTML",
+                )
+                if success:
+                    send_to_group_success = True
+                    logger.info(f"✅ [{operation_id}] CSV文件已发送到群组 {chat_id}")
+                else:
+                    logger.error(f"❌ [{operation_id}] bot_manager 发送文档失败")
+            except Exception as e:
+                logger.error(f"❌ [{operation_id}] 发送到群组失败: {e}")
+                if not is_daily_reset:  # 只在非自动重置时提示用户
+                    await bot_manager.send_message_with_retry(
+                        chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
+                    )
+        else:
+            logger.debug(f"⏭️ [{operation_id}] push_file=False，跳过文件发送")
+            send_to_group_success = True  # 不推送也视为成功
 
         if to_admin_if_no_group and notification_service:
             try:
