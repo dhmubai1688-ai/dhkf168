@@ -4663,6 +4663,92 @@ class PostgreSQLDatabase:
             using_state=False,
         )
 
+    def _is_time_in_window(
+        self,
+        now: datetime,
+        shift: str,
+        shift_detail: str,
+        checkin_type: str,
+        window_info: dict,
+    ) -> bool:
+        """判断时间是否在窗口内"""
+        try:
+            if checkin_type == "work_start":
+                if shift == "day":
+                    day_window = window_info.get("day_window", {}).get("work_start", {})
+                    return bool(
+                        day_window.get("start")
+                        and day_window.get("end")
+                        and day_window["start"] <= now <= day_window["end"]
+                    )
+                else:  # night
+                    night_window = window_info.get("night_window", {})
+                    if shift_detail == "night_last":
+                        target = night_window.get("last_night", {}).get(
+                            "work_start", {}
+                        )
+                    else:  # night_tonight
+                        target = night_window.get("tonight", {}).get("work_start", {})
+                    return bool(
+                        target.get("start")
+                        and target.get("end")
+                        and target["start"] <= now <= target["end"]
+                    )
+            else:  # work_end
+                if shift == "day":
+                    day_window = window_info.get("day_window", {}).get("work_end", {})
+                    return bool(
+                        day_window.get("start")
+                        and day_window.get("end")
+                        and day_window["start"] <= now <= day_window["end"]
+                    )
+                else:  # night
+                    night_window = window_info.get("night_window", {})
+                    if shift_detail == "night_last":
+                        target = night_window.get("last_night", {}).get("work_end", {})
+                    else:  # night_tonight
+                        target = night_window.get("tonight", {}).get("work_end", {})
+                    return bool(
+                        target.get("start")
+                        and target.get("end")
+                        and target["start"] <= now <= target["end"]
+                    )
+        except Exception as e:
+            logger.error(f"窗口检查失败: {e}")
+            return False
+
+    def _fallback_shift_detail(
+        self,
+        now,
+        shift_config,
+    ):
+
+        day_start = shift_config.get("day_start", "09:00")
+
+        day_end = shift_config.get("day_end", "21:00")
+
+        day_start_dt = datetime.combine(
+            now.date(),
+            datetime.strptime(day_start, "%H:%M").time(),
+        ).replace(tzinfo=now.tzinfo)
+
+        day_end_dt = datetime.combine(
+            now.date(),
+            datetime.strptime(day_end, "%H:%M").time(),
+        ).replace(tzinfo=now.tzinfo)
+
+        if day_start_dt <= now < day_end_dt:
+
+            return "day"
+
+        elif now >= day_end_dt:
+
+            return "night_tonight"
+
+        else:
+
+            return "night_last"
+
     # ========== 数据清理 ==========
     async def cleanup_old_data(self, days: int = 30):
         """清理旧数据"""
