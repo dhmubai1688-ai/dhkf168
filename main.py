@@ -1534,8 +1534,7 @@ async def start_activity(message: types.Message, act: str):
         if act == "吃饭":
             try:
                 notification_text = (
-                    f"🍽️ <b>吃饭通知</b> <code>{shift_text}</code>\n"
-                    f" {MessageFormatter.format_user_link(uid, name)} 去吃饭了\n"
+                    f" {MessageFormatter.format_user_link(uid, name)} <b>去吃饭了</b>\n"
                     f"⏰ 时间：<code>{now.strftime('%H:%M:%S')}</code>\n"
                 )
                 asyncio.create_task(
@@ -1926,8 +1925,7 @@ async def _process_back_locked(
                     pass
 
                 eat_end_notification_text = (
-                    f"🍽️ <b>吃饭结束通知</b>\n"
-                    f"{MessageFormatter.format_user_link(uid, user_data.get('nickname', '用户'))} 吃饭回来了\n"
+                    f"{MessageFormatter.format_user_link(uid, user_data.get('nickname', '用户'))} <b>吃饭回来了</b>\n"
                     f"⏱️ 吃饭耗时：<code>{elapsed_time_str}</code>\n"
                 )
 
@@ -2405,19 +2403,20 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
 
             if time_diff_seconds > 0:
                 # ✅ 修正1：统一使用分钟（因为 calculate_work_fine 期望分钟）
-                fine_amount = await calculate_work_fine("work_start", time_diff_seconds / 60)  # 秒转分钟
-                
+                fine_amount = await calculate_work_fine(
+                    "work_start", time_diff_seconds / 60
+                )  # 秒转分钟
+
                 duration = MessageFormatter.format_duration(time_diff_seconds)
-                
+
                 # ✅ 修正2：统一显示格式，不使用换行符
                 if fine_amount > 0:
                     status = f"🚨 迟到 {duration}（💰扣除绩效 {fine_amount} 分）"
                 else:
                     status = f"🚨 迟到 {duration}"
-                
+
                 is_late_early = True
                 emoji_status = "😅"
-
 
             # ========== 🎯 写入数据库（带重试）==========
             db_write_success = False
@@ -2665,15 +2664,15 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                 fine_amount = await calculate_work_fine(
                     "work_end", abs(time_diff_seconds) / 60  # 秒转分钟
                 )
-                
+
                 duration = MessageFormatter.format_duration(abs(time_diff_seconds))
-                
+
                 # ✅ 修正2：统一显示格式
                 if fine_amount > 0:
                     status = f"🚨 早退 {duration}（💰扣除绩效 {fine_amount} 分）"
                 else:
                     status = f"🚨 早退 {duration}"
-                
+
                 is_late_early = True
                 emoji_status = "🏃"
             elif time_diff_seconds > 0:
@@ -6527,8 +6526,7 @@ async def show_history(message: types.Message, shift: str = None):
 
     text = (
         f"{title}\n"
-        f"📅 统计周期：<code>{business_date.strftime('%Y-%m-%d')}</code>\n"
-        f"⏰ 重置时间：{reset_hour:02d}:{reset_minute:02d}\n\n"
+        f"📅 统计周期：<code>{business_date.strftime('%Y-%m-%d')}</code> <code>{reset_hour:02d}:{reset_minute:02d}</code>\n\n"
     )
 
     has_records = False
@@ -6860,8 +6858,7 @@ async def show_rank(message: types.Message, shift: str = None):
 
     rank_text = (
         f"{title}\n"
-        f"📅 统计周期：<code>{business_date.strftime('%Y-%m-%d')}</code>\n"
-        f"⏰ 重置时间：<code>{reset_hour:02d}:{reset_minute:02d}</code>\n"
+        f"📅 统计周期：<code>{business_date.strftime('%Y-%m-%d')}</code> <code>{reset_hour:02d}:{reset_minute:02d}</code>\n"
     )
 
     if shift:
