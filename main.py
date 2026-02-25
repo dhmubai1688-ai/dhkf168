@@ -5997,7 +5997,7 @@ async def show_history(message: types.Message, shift: str = None):
     async with db.pool.acquire() as conn:
         if shift:
             if shift == "night":
-                query_date = business_date - timedelta(days=1)
+                query_date = business_date
                 logger.info(
                     f"🌙 [我的记录-夜班] 查询日期: "
                     f"业务日期={business_date}, 查询日期={query_date}"
@@ -6277,7 +6277,7 @@ async def show_rank(message: types.Message, shift: str = None):
         try:
             if shift:
                 if shift == "night":
-                    query_date = business_date - timedelta(days=1)
+                    query_date = business_date
                     logger.info(
                         f"🌙 [排行榜-夜班] 查询日期: "
                         f"业务日期={business_date}, 查询日期={query_date}"
