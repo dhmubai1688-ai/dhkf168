@@ -6143,13 +6143,25 @@ async def show_history(message: types.Message, shift: str = None):
 
     async with db.pool.acquire() as conn:
         if shift:
+            # 罚款统计使用与活动记录相同的日期逻辑
             if shift == "night":
-                fine_query_date = business_date - timedelta(days=1)
-            else:
+                # 夜班：罚款日期 = 活动查询日期 (business_date)
+                fine_query_date = business_date  # ✅ 修复：与活动记录保持一致
+                logger.info(
+                    f"🌙 [罚款统计-夜班] 查询日期: "
+                    f"业务日期={business_date}, 罚款查询日期={fine_query_date}"
+                )
+            else:  # day
                 if current_time_decimal < day_start_decimal:
                     fine_query_date = business_date - timedelta(days=1)
+                    logger.info(
+                        f"🌙 [罚款统计-白班] 凌晨查询前一天: "
+                        f"当前时间={current_hour:02d}:{current_minute:02d}, "
+                        f"罚款查询日期={fine_query_date}"
+                    )
                 else:
                     fine_query_date = business_date
+                    logger.info(f"☀️ [罚款统计-白班] 正常查询当天: {fine_query_date}")
 
             fine_total = (
                 await conn.fetchval(
@@ -6165,12 +6177,13 @@ async def show_history(message: types.Message, shift: str = None):
                 """,
                     chat_id,
                     uid,
-                    fine_query_date,
+                    fine_query_date,  # ✅ 使用修复后的日期
                     shift,
                 )
                 or 0
             )
         else:
+            # 全部班次罚款统计（保持不变）
             if current_time_decimal < day_start_decimal:
                 fine_query_date = business_date - timedelta(days=1)
                 logger.info(f"🌙 [罚款统计-全部] 凌晨查询前一天: {fine_query_date}")
