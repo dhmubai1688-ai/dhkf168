@@ -2954,8 +2954,8 @@ class PostgreSQLDatabase:
                     datetime.combine(month_start, datetime.min.time())
                 )
 
-                month_end_dt = datetime.combine(month_end, time(0, 0)).replace(
-                    tzinfo=beijing_tz
+                month_end_dt = beijing_tz.localize(
+                    datetime.combine(month_end, datetime.min.time())
                 )
 
                 for shift in night_shifts:
