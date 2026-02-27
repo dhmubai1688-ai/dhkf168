@@ -687,13 +687,15 @@ async def _export_yesterday_data_concurrent(
     from main import export_and_push_csv
 
     source = "月度表" if from_monthly else "日常表"
-    already_sent = False
+
+    # 使用 asyncio.Event 进行跨任务协调
+    already_sent_event = asyncio.Event()
     success_count = 0
 
     async def task_wrapper(attempt: int) -> bool:
-        nonlocal already_sent
+        # 检查是否已经有任务成功发送
+        push_file = not already_sent_event.is_set()
         file_name = f"dual_shift_backup_{chat_id}_{target_date.strftime('%Y%m%d')}.csv"
-        push_file = not already_sent
 
         try:
             result = await export_and_push_csv(
@@ -706,8 +708,8 @@ async def _export_yesterday_data_concurrent(
             )
 
             if result:
-                if not already_sent:
-                    already_sent = True
+                if not already_sent_event.is_set():
+                    already_sent_event.set()  # 标记已发送
                     logger.info(
                         f"✅ [数据导出] 群组{chat_id} 第{attempt+1}次尝试成功，已推送"
                     )
@@ -726,7 +728,7 @@ async def _export_yesterday_data_concurrent(
     results = await asyncio.gather(*tasks)
     success_count = sum(1 for r in results if r is True)
 
-    if already_sent:
+    if already_sent_event.is_set():
         logger.info(f"📊 [数据导出] 群组{chat_id} 共 {success_count} 次成功，已推送1次")
         return True
     else:
