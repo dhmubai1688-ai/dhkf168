@@ -2859,15 +2859,15 @@ class PostgreSQLDatabase:
                 fines = (
                     await conn.fetchval(
                         """
-                    SELECT SUM(accumulated_time)
-                    FROM daily_statistics
-                    WHERE chat_id = $1
-                      AND user_id = $2
-                      AND record_date >= $3
-                      AND record_date < $4
-                      AND activity_name IN ('total_fines', 'work_fines', 
-                                           'work_start_fines', 'work_end_fines')
-                    """,
+                        SELECT SUM(accumulated_time)
+                        FROM daily_statistics
+                        WHERE chat_id = $1
+                          AND user_id = $2
+                          AND record_date >= $3
+                          AND record_date < $4
+                          AND activity_name IN ('total_fines', 'work_fines', 
+                                               'work_start_fines', 'work_end_fines')
+                        """,
                         chat_id,
                         user_id,
                         month_start,
@@ -2981,9 +2981,6 @@ class PostgreSQLDatabase:
                             )
                             night_work_days += 1
 
-                total_work_days = work_days + night_work_days
-                total_work_hours = work_hours + night_work_hours
-
                 work_counts = await conn.fetchrow(
                     """
                     SELECT 
@@ -3007,6 +3004,39 @@ class PostgreSQLDatabase:
                     chat_id, user_id, year, month
                 )
 
+                # ========== 安全处理所有可能为 None 的值 ==========
+                def safe_int(value):
+                    """安全转换为整数，处理 None 值"""
+                    return 0 if value is None else int(value)
+
+                total_activity_count = safe_int(total_activity_count)
+                total_accumulated_time = safe_int(total_accumulated_time)
+                fines = safe_int(fines)
+                overtime_count = safe_int(overtime_count)
+                total_overtime_time = safe_int(total_overtime_time)
+
+                work_days = safe_int(work_days)
+                work_hours = safe_int(work_hours)
+                night_work_days = safe_int(night_work_days)
+                night_work_hours = safe_int(night_work_hours)
+
+                total_work_days = work_days + night_work_days
+                total_work_hours = work_hours + night_work_hours
+
+                if work_counts:
+                    work_start_count = safe_int(work_counts["work_start_count"])
+                    work_end_count = safe_int(work_counts["work_end_count"])
+                    work_start_fines = safe_int(work_counts["work_start_fines"])
+                    work_end_fines = safe_int(work_counts["work_end_fines"])
+                else:
+                    work_start_count = 0
+                    work_end_count = 0
+                    work_start_fines = 0
+                    work_end_fines = 0
+
+                late_count = safe_int(late_early.get("late_count", 0))
+                early_count = safe_int(late_early.get("early_count", 0))
+
                 user_data = {
                     "user_id": user_id,
                     "nickname": nickname,
@@ -3017,20 +3047,12 @@ class PostgreSQLDatabase:
                     "total_overtime_time": total_overtime_time,
                     "work_days": total_work_days,
                     "work_hours": total_work_hours,
-                    "work_start_count": (
-                        work_counts["work_start_count"] if work_counts else 0
-                    ),
-                    "work_end_count": (
-                        work_counts["work_end_count"] if work_counts else 0
-                    ),
-                    "work_start_fines": (
-                        work_counts["work_start_fines"] if work_counts else 0
-                    ),
-                    "work_end_fines": (
-                        work_counts["work_end_fines"] if work_counts else 0
-                    ),
-                    "late_count": late_early.get("late_count", 0),
-                    "early_count": late_early.get("early_count", 0),
+                    "work_start_count": work_start_count,
+                    "work_end_count": work_end_count,
+                    "work_start_fines": work_start_fines,
+                    "work_end_fines": work_end_fines,
+                    "late_count": late_count,
+                    "early_count": early_count,
                     "activities": activities,
                 }
 
