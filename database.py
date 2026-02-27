@@ -2950,9 +2950,10 @@ class PostgreSQLDatabase:
                 night_work_days = 0
                 night_work_hours = 0
 
-                month_start_dt = datetime.combine(month_start, time(0, 0)).replace(
-                    tzinfo=beijing_tz
+                month_start_dt = beijing_tz.localize(
+                    datetime.combine(month_start, datetime.min.time())
                 )
+
                 month_end_dt = datetime.combine(month_end, time(0, 0)).replace(
                     tzinfo=beijing_tz
                 )
