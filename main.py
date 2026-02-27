@@ -104,31 +104,60 @@ def get_user_lock(chat_id: int, uid: int):
 async def auto_end_current_activity(
     chat_id: int, uid: int, user_data: dict, now: datetime, message: types.Message
 ):
-    """自动结束当前活动"""
+    """自动结束当前活动 - 增强班次检查"""
     try:
         act = user_data["current_activity"]
         start_time_dt = datetime.fromisoformat(user_data["activity_start_time"])
-        shift = user_data.get("shift", "day")
+        activity_shift = user_data.get("shift", "day")
+
+        # ===== 新增：获取当前操作的班次 =====
+        # 从消息中获取当前操作的班次（需要在 process_work_checkin 中设置）
+        current_operation_shift = getattr(message, "_current_shift", None)
+
+        # 如果无法从消息获取，尝试从班次状态表获取用户当前活跃的班次
+        if not current_operation_shift:
+            active_shift = await db.get_user_active_shift(chat_id, uid)
+            if active_shift:
+                current_operation_shift = active_shift.get("shift")
+
+        logger.info(
+            f"🔍 自动结束活动检查: "
+            f"活动班次={activity_shift}, "
+            f"当前操作班次={current_operation_shift}"
+        )
+
+        # ===== 关键检查：只有相同班次才能结束 =====
+        if current_operation_shift and current_operation_shift != activity_shift:
+            logger.info(
+                f"⏭️ 跳过结束不同班次活动: "
+                f"活动班次={activity_shift}, "
+                f"操作班次={current_operation_shift}"
+            )
+            return
+        # ===== 检查结束 =====
+
         elapsed = int((now - start_time_dt).total_seconds())
 
+        # 获取班次信息用于日期判定
         shift_info = await db.determine_shift_for_time(
             chat_id=chat_id,
             current_time=now,
             checkin_type="work_end",
+            active_shift=activity_shift,
+            active_record_date=start_time_dt.date(),
         )
 
         forced_date = None
         if shift_info:
             forced_date = shift_info.get("record_date")
-            is_dual = shift_info.get("is_dual", False)
             logger.info(
                 f"📅 自动结束活动 - 班次判定: {shift_info.get('shift_detail')}, "
                 f"记录日期: {forced_date}"
             )
         else:
             forced_date = now.date()
-            logger.info(f"📅 自动结束活动 - 无法判定班次，使用当前日期: {forced_date}")
 
+        # 完成活动
         await db.complete_user_activity(
             chat_id=chat_id,
             user_id=uid,
@@ -136,15 +165,16 @@ async def auto_end_current_activity(
             elapsed_time=elapsed,
             fine_amount=0,
             is_overtime=False,
-            shift=shift,
+            shift=activity_shift,
             forced_date=forced_date,
         )
 
+        # 清理定时器
         await timer_manager.cancel_timer(f"{chat_id}-{uid}", preserve_message=False)
 
         logger.info(
             f"✅ 自动结束活动: {chat_id}-{uid} - {act} "
-            f"(班次: {shift}, 日期: {forced_date})"
+            f"(班次: {activity_shift}, 日期: {forced_date})"
         )
 
     except Exception as e:
@@ -2458,13 +2488,37 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
 
             activity_auto_ended = False
             current_activity = user_data.get("current_activity") if user_data else None
+            current_activity_shift = user_data.get("shift") if user_data else None
+
             if current_activity:
-                with suppress(Exception):
-                    await auto_end_current_activity(
-                        chat_id, uid, user_data, now, message
+                # ===== 新增：检查活动班次与下班班次是否匹配 =====
+                if current_activity_shift and current_activity_shift != shift:
+                    logger.info(
+                        f"[{trace_id}] ⏭️ 跳过结束不同班次活动: "
+                        f"活动班次={current_activity_shift}, "
+                        f"下班班次={shift}"
                     )
-                    activity_auto_ended = True
-                    logger.info(f"[{trace_id}] 🔄 已自动结束活动：{current_activity}")
+                    # 可以发送提醒，但不结束活动
+                    await message.answer(
+                        f"ℹ️ <b>提示</b>\n\n"
+                        f"您当前有 <code>{'夜班' if current_activity_shift == 'night' else '白班'}</code> 活动 "
+                        f"<code>{current_activity}</code> 正在进行中，\n"
+                        f"但您正在打 <code>{'白班' if shift == 'day' else '夜班'}</code> 下班卡。\n\n"
+                        f"该活动不会被自动结束，请在换班前手动结束。",
+                        parse_mode="HTML",
+                        reply_to_message_id=message.message_id,
+                    )
+                else:
+                    # 只有班次匹配时才自动结束活动
+                    with suppress(Exception):
+                        await auto_end_current_activity(
+                            chat_id, uid, user_data, now, message
+                        )
+                        activity_auto_ended = True
+                        logger.info(
+                            f"[{trace_id}] 🔄 已自动结束活动：{current_activity}"
+                        )
+                # ===== 新增结束 =====
 
             db_write_success = False
             for attempt in range(3):
