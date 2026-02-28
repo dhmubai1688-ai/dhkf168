@@ -99,7 +99,7 @@ class Config:
     MONTHLY_EXPORT_ENABLED = (
         os.getenv("MONTHLY_EXPORT_ENABLED", "true").lower() == "true"
     )
-    MONTHLY_EXPORT_HOUR = int(os.getenv("MONTHLY_EXPORT_HOUR", "2"))
+    MONTHLY_EXPORT_HOUR = int(os.getenv("MONTHLY_EXPORT_HOUR", "15"))
     MONTHLY_EXPORT_MINUTE = int(os.getenv("MONTHLY_EXPORT_MINUTE", "0"))
 
     # 自动清理配置
@@ -191,3 +191,4 @@ try:
 except ValueError as e:
     logging.error(f"配置验证失败: {e}")
     raise
+
