@@ -7173,6 +7173,13 @@ async def daily_reset_task():
 
         natural_today = now.date()
 
+        # ===== 🎯 新增：每月1号特殊处理 =====
+        if natural_today.day == 1:
+            # 1号特殊处理：重置时间改为15点
+            reset_hour = 15
+            reset_minute = 0
+            logger.info(f"📅 [每月1号] 群组 {chat_id} 使用特殊重置时间: 15:00 (17:00执行)")
+
         reset_time_today = datetime.combine(
             natural_today, dt_time(reset_hour, reset_minute)
         ).replace(tzinfo=now.tzinfo)
@@ -7198,6 +7205,13 @@ async def daily_reset_task():
             period_info = "补执行"
         else:
             return
+
+        # ===== 🎯 新增：1号时确保target_date是上月最后一天 =====
+        if natural_today.day == 1:
+            # 强制target_date为上月最后一天
+            first_day_of_month = date(natural_today.year, natural_today.month, 1)
+            target_date = first_day_of_month - timedelta(days=1)
+            logger.info(f"📅 [每月1号] 强制目标日期为上月最后一天: {target_date}")
 
         reset_flag_key = f"dual_reset:{chat_id}:{target_date.strftime('%Y%m%d')}"
         from performance import global_cache
