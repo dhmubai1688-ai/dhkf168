@@ -22,6 +22,19 @@ async def handle_hard_reset(
     硬重置总调度入口 - 纯双班模式
     """
     try:
+        # ===== 🎯 新增：每月1号特殊处理 =====
+        now = db.get_beijing_time()
+        natural_today = now.date()
+        
+        # 如果是每月1号且没有指定目标日期，强制设置目标日期为上月最后一天
+        if natural_today.day == 1 and not target_date:
+            # 计算上月最后一天
+            first_day_of_month = date(natural_today.year, natural_today.month, 1)
+            target_date = first_day_of_month - timedelta(days=1)
+            logger.info(
+                f"📅 [每月1号特殊处理] handle_hard_reset 强制目标日期为上月最后一天: {target_date}"
+            )
+
         logger.info(f"🔄 [双班模式] 群组 {chat_id} 执行双班硬重置")
 
         if target_date:
