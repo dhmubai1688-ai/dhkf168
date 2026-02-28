@@ -7178,7 +7178,7 @@ async def daily_reset_task():
             # 1号特殊处理：重置时间改为15点
             reset_hour = 15
             reset_minute = 0
-            logger.info(f"📅 [每月1号] 群组 {chat_id} 使用特殊重置时间: 15:00 (17:00执行)")
+            logger.debug(f"📅 [每月1号] 群组 {chat_id} 使用特殊重置时间: 15:00 (17:00执行)")
 
         reset_time_today = datetime.combine(
             natural_today, dt_time(reset_hour, reset_minute)
