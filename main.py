@@ -88,16 +88,12 @@ active_back_processing: Dict[str, bool] = {}
 # ========== 日志中间件 ==========
 class LoggingMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: types.Message, data):
-        # ===== 第三步修复：每次收到消息更新健康时间戳 =====
-        if hasattr(bot_manager, "_last_successful_connection"):
-            bot_manager._last_successful_connection = time.time()
-        # ===== 第三步修复结束 =====
-        
         if event.text:
             logger.info(
                 f"📨 收到消息: chat_id={event.chat.id}, uid={event.from_user.id}, text='{event.text}'"
             )
         return await handler(event, data)
+
 
 # ========== 上下班打卡辅助函数 ==========
 def get_user_lock(chat_id: int, uid: int):
@@ -7765,53 +7761,11 @@ async def keepalive_loop():
 
 
 async def on_startup():
-    """启动时执行 - 增强版"""
+    """启动时执行"""
     logger.info("🎯 机器人启动中...")
-    
     try:
-        # ===== 1. 先初始化数据库 =====
-        if hasattr(db, "initialize"):
-            await db.initialize()
-            logger.info("✅ 数据库初始化完成")
-        
-        # ===== 2. 强制解决冲突 =====
-        # 在初始化 bot 之前强制清理
-        if hasattr(bot_manager, '_force_resolve_conflict'):
-            logger.info("🔄 强制解决潜在的冲突...")
-            await bot_manager._force_resolve_conflict()
-        
-        # ===== 3. 初始化 Bot =====
-        await bot_manager.initialize()
-        
-        # ===== 4. 多次尝试删除 webhook =====
-        webhook_deleted = False
-        for attempt in range(5):
-            try:
-                await bot_manager.bot.delete_webhook(drop_pending_updates=True)
-                logger.info(f"✅ Webhook 已删除 (尝试 {attempt+1}/5)")
-                webhook_deleted = True
-                break
-            except Exception as e:
-                logger.warning(f"⚠️ 删除 webhook 失败 (尝试 {attempt+1}/5): {e}")
-                if attempt < 4:
-                    wait_time = 2 * (attempt + 1)  # 递增等待时间
-                    await asyncio.sleep(wait_time)
-        
-        if not webhook_deleted:
-            logger.warning("⚠️ 所有删除 webhook 尝试均失败，继续执行...")
-        
-        # 额外等待确保清理生效
-        await asyncio.sleep(2)
-        
-        # ===== 5. 获取 bot 信息验证连接 =====
-        try:
-            me = await bot_manager.bot.get_me()
-            logger.info(f"🤖 Bot 信息: @{me.username} (ID: {me.id})")
-        except Exception as e:
-            logger.error(f"❌ 无法获取 bot 信息: {e}")
-            raise
-        
-        # ===== 6. 注册命令 =====
+        await bot_manager.bot.delete_webhook(drop_pending_updates=True)
+
         user_commands = [
             BotCommand(command="wc", description="🚽 小厕"),
             BotCommand(command="bigwc", description="🚻 大厕"),
@@ -7836,42 +7790,24 @@ async def on_startup():
             BotCommand(command="admin", description="🛠 管理员全指令指南"),
         ]
 
-        logger.info(f"📋 注册普通用户命令: {len(user_commands)} 个")
-        
-        # 注册普通用户命令
-        try:
-            res_user = await bot_manager.bot.set_my_commands(commands=user_commands)
-            logger.info(f"✅ 普通用户命令注册成功")
-        except Exception as e:
-            logger.error(f"❌ 普通用户命令注册失败: {e}")
+        logger.info(f"📋 要注册的命令列表: {[cmd.command for cmd in user_commands]}")
 
-        # 注册管理员命令
-        try:
-            res_admin = await bot_manager.bot.set_my_commands(
-                commands=admin_commands, 
-                scope=BotCommandScopeAllChatAdministrators()
-            )
-            logger.info(f"✅ 管理员指令菜单注册成功")
-        except Exception as e:
-            logger.error(f"❌ 管理员命令注册失败: {e}")
+        res_user = await bot_manager.bot.set_my_commands(commands=user_commands)
+        logger.info(f"✅ 普通用户命令注册结果: {res_user}")
 
-        # ===== 7. 发送启动通知 =====
-        try:
-            await send_startup_notification()
-        except Exception as e:
-            logger.warning(f"⚠️ 发送启动通知失败: {e}")
+        res_admin = await bot_manager.bot.set_my_commands(
+            commands=admin_commands, scope=BotCommandScopeAllChatAdministrators()
+        )
+        logger.info(f"✅ 管理员指令菜单注册结果: {res_admin}")
 
-        # ===== 8. 最终健康检查 =====
-        if hasattr(bot_manager, 'is_healthy') and bot_manager.is_healthy():
-            logger.info("✅ Bot 健康状态检查通过")
-        else:
-            logger.warning("⚠️ Bot 健康状态检查未通过，但将继续运行")
+        if hasattr(db, "initialize"):
+            await db.initialize()
 
-        logger.info("🎉 系统启动完成，准备接收消息")
-        
+        await send_startup_notification()
+        logger.info("✅ 系统启动完成，准备接收消息")
+
     except Exception as e:
         logger.error(f"❌ 启动过程异常: {e}")
-        logger.exception("详细错误信息:")
         raise
 
 
