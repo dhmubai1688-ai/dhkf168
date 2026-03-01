@@ -158,42 +158,85 @@ class RobustBotManager:
             logger.error(f"[{self._instance_id}] ❌ 确保干净状态失败: {e}")
 
     async def _force_resolve_conflict(self):
-        """强制解决冲突 - 新增"""
+        """强制解决冲突 - 终极增强版"""
         logger.warning(f"[{self._instance_id}] 🚨 执行强制冲突解决...")
 
-        # 关闭当前连接
+        # 1. 尝试获取当前 webhook 信息
+        try:
+            webhook_info = await self.bot.get_webhook_info()
+            logger.info(f"[{self._instance_id}] 📡 当前 webhook: {webhook_info.url}")
+        except:
+            pass
+
+        # 2. 多次尝试删除 webhook
+        for attempt in range(5):
+            try:
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                logger.info(f"[{self._instance_id}] ✅ 强制删除 webhook 成功 (尝试 {attempt+1}/5)")
+                break
+            except Exception as e:
+                logger.warning(f"[{self._instance_id}] ⚠️ 删除 webhook 失败 (尝试 {attempt+1}/5): {e}")
+                if attempt < 4:
+                    await asyncio.sleep(3)
+
+        # 3. 关闭当前连接
         if self.bot and self.bot.session:
             try:
                 await self.bot.session.close()
-            except Exception:
-                pass
+                logger.info(f"[{self._instance_id}] ✅ 关闭旧会话成功")
+            except Exception as e:
+                logger.warning(f"[{self._instance_id}] ⚠️ 关闭旧会话失败: {e}")
 
-        # 等待一下
-        await asyncio.sleep(3)
+        # 4. 等待更长时间确保连接完全释放
+        await asyncio.sleep(10)
 
-        # 重新创建 bot
+        # 5. 重新创建 bot
         self.bot = Bot(token=self.token)
+        logger.info(f"[{self._instance_id}] ✅ 重新创建 bot 实例")
 
-        # 强制删除 webhook
+        # 6. 再次删除 webhook
+        for attempt in range(3):
+            try:
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                logger.info(f"[{self._instance_id}] ✅ 重启后删除 webhook 成功 (尝试 {attempt+1}/3)")
+                break
+            except Exception as e:
+                logger.warning(f"[{self._instance_id}] ⚠️ 重启后删除 webhook 失败 (尝试 {attempt+1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+
+        # 7. 验证 webhook 状态
         try:
-            await self.bot.delete_webhook(drop_pending_updates=True)
-            logger.info(f"[{self._instance_id}] ✅ 强制删除 webhook 成功")
+            webhook_info = await self.bot.get_webhook_info()
+            logger.info(f"[{self._instance_id}] 📡 最终 webhook 状态: {webhook_info}")
         except Exception as e:
-            logger.error(f"[{self._instance_id}] ❌ 强制删除 webhook 失败: {e}")
+            logger.warning(f"[{self._instance_id}] ⚠️ 获取 webhook 状态失败: {e}")
 
-        # 重置冲突计数
+        # 8. 重置冲突计数
         self._conflict_count = 0
         self._last_conflict_time = time.time()
 
+        logger.info(f"[{self._instance_id}] ✅ 强制冲突解决完成")
         await asyncio.sleep(5)
 
     async def start_polling_with_retry(self):
-        """稳定轮询 - 带启动锁和冲突处理"""
-        # 启动锁检查
+        """稳定轮询 - 带启动锁和冲突处理（增强版）"""
+        # 启动锁检查 - 增强版：如果已启动，尝试强制接管
         async with RobustBotManager._start_lock:
             if RobustBotManager._global_started:
-                logger.warning(f"[{self._instance_id}] ⏭️ 全局已启动，跳过")
-                return
+                logger.warning(
+                    f"[{self._instance_id}] ⚠️ 检测到全局已启动 [ID: {RobustBotManager._active_instance_id}]，尝试强制接管..."
+                )
+                # 等待一下，让旧实例有机会自己清理
+                await asyncio.sleep(3)
+
+                # 如果还是标记为已启动，强制重置
+                if RobustBotManager._global_started:
+                    logger.warning(f"[{self._instance_id}] ⚠️ 强制重置全局启动状态")
+                    RobustBotManager._global_started = False
+                    RobustBotManager._active_token = None
+                    RobustBotManager._active_instance_id = None
+
             RobustBotManager._global_started = True
             RobustBotManager._active_token = self.token
             RobustBotManager._active_instance_id = self._instance_id
@@ -204,8 +247,11 @@ class RobustBotManager:
         if not self.bot:
             await self.initialize()
 
-        # 确保 Telegram 端是干净状态
+        # 确保 Telegram 端是干净状态 - 增强版：多次尝试
         await self._ensure_clean_telegram_state()
+
+        # 额外等待确保 webhook 完全清除
+        await asyncio.sleep(2)
 
         is_render = "RENDER" in os.environ
         polling_config = {
@@ -215,6 +261,13 @@ class RobustBotManager:
 
         consecutive_errors = 0
         self._conflict_count = 0
+        force_resolve_attempted = False
+
+        # ===== 第二步修复：在进入循环前初始化时间戳 =====
+        # 这表示轮询即将开始，Bot 是健康的
+        self._last_successful_connection = time.time()
+        logger.info(f"[{self._instance_id}] ✅ Bot准备开始轮询，健康时间戳已初始化")
+        # ===== 第二步修复结束 =====
 
         while self._is_running and self._current_retry < self._max_retries:
             try:
@@ -234,17 +287,18 @@ class RobustBotManager:
                     if self._shutdown_event.is_set():
                         break
 
+                # ===== 重要：在每次轮询尝试前也更新时间戳 =====
+                self._last_successful_connection = time.time()
+                # ===== 结束 =====
+
                 await self.dispatcher.start_polling(
                     self.bot, skip_updates=True, **polling_config
                 )
 
-                # 成功
-                self._last_successful_connection = time.time()
-                self._current_retry = 0
-                consecutive_errors = 0
-                self._conflict_count = 0
-                logger.info(f"[{self._instance_id}] ✅ Bot轮询成功")
-                break
+                # 这里的代码永远不会执行，因为 start_polling 会阻塞
+                # 成功后的处理实际上永远不会到达这里
+                # 但保留这部分代码以防未来版本变化
+                logger.info(f"[{self._instance_id}] ⚠️ start_polling 意外退出")
 
             except asyncio.CancelledError:
                 logger.info(f"[{self._instance_id}] Bot轮询被取消")
@@ -261,13 +315,51 @@ class RobustBotManager:
                     f"[{self._instance_id}] ❌ 冲突错误 (第{self._conflict_count}次): {e}"
                 )
 
-                # 冲突次数过多，执行强制解决
+                # ===== 增强的冲突处理 =====
+                # 第一次冲突就尝试快速恢复
+                if self._conflict_count >= 1 and not force_resolve_attempted:
+                    logger.warning(f"[{self._instance_id}] 🔄 尝试快速恢复...")
+
+                    # 快速删除 webhook
+                    try:
+                        await self.bot.delete_webhook(drop_pending_updates=True)
+                        logger.info(f"[{self._instance_id}] ✅ 快速删除 webhook 成功")
+                        await asyncio.sleep(3)
+                    except Exception as we:
+                        logger.warning(f"快速删除 webhook 失败: {we}")
+
+                # 连续2次冲突，执行中等强度恢复
+                if self._conflict_count >= 2:
+                    logger.warning(f"[{self._instance_id}] 🔄 尝试中等强度恢复...")
+
+                    # 关闭当前连接
+                    if self.bot and self.bot.session:
+                        try:
+                            await self.bot.session.close()
+                        except:
+                            pass
+
+                    await asyncio.sleep(5)
+
+                    # 重新创建 bot
+                    self.bot = Bot(token=self.token)
+
+                    # 删除 webhook
+                    try:
+                        await self.bot.delete_webhook(drop_pending_updates=True)
+                        logger.info(f"[{self._instance_id}] ✅ 重建后删除 webhook 成功")
+                    except Exception as we:
+                        logger.error(f"重建后删除 webhook 失败: {we}")
+
+                # 连续3次冲突，执行强制解决
                 if self._conflict_count >= 3:
                     logger.critical(
                         f"[{self._instance_id}] 🚨 连续{self._conflict_count}次冲突，执行强制解决..."
                     )
                     await self._force_resolve_conflict()
                     self._conflict_count = 0
+                    force_resolve_attempted = True
+                # ===== 结束增强冲突处理 =====
 
                 if self._current_retry >= self._max_retries:
                     logger.critical(
@@ -275,8 +367,8 @@ class RobustBotManager:
                     )
                     break
 
-                # 冲突等待时间逐步增加
-                delay = min(30 * self._conflict_count, 120)
+                # 冲突等待时间逐步增加 - 增加最大等待时间
+                delay = min(30 * self._conflict_count, 300)  # 最大5分钟
                 logger.info(
                     f"[{self._instance_id}] ⏳ 冲突等待 {delay}s (第{self._conflict_count}次)..."
                 )
