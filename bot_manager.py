@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import os
 from typing import Optional, Dict, Any
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -31,9 +32,24 @@ class RobustBotManager:
         logger.info("Bot管理器初始化完成")
 
     async def start_polling_with_retry(self):
-        """带重试的轮询启动"""
+        """企业级稳定轮询结构"""
         self._is_running = True
         self._current_retry = 0
+
+        # 环境检测
+        is_render = "RENDER" in os.environ
+
+        # 只在启动时删除 webhook 一次
+        try:
+            await self.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Webhook已删除")
+        except Exception as e:
+            logger.warning(f"⚠️ 删除webhook失败: {e}")
+
+        polling_config = {
+            "timeout": 30 if is_render else 20,
+            "allowed_updates": ["message", "callback_query", "chat_member"],
+        }
 
         while self._is_running and self._current_retry < self._max_retries:
             try:
@@ -42,16 +58,14 @@ class RobustBotManager:
                     f"🤖 启动Bot轮询 (尝试 {self._current_retry}/{self._max_retries})"
                 )
 
-                await self.bot.delete_webhook(drop_pending_updates=True)
-                logger.info("✅ Webhook已删除，使用轮询模式")
-
                 await self.dispatcher.start_polling(
                     self.bot,
                     skip_updates=True,
-                    allowed_updates=["message", "callback_query", "chat_member"],
+                    **polling_config
                 )
 
                 self._last_successful_connection = time.time()
+                self._current_retry = 0  # 重置重试计数
                 logger.info("Bot轮询正常结束")
                 break
 
@@ -60,19 +74,30 @@ class RobustBotManager:
                 break
 
             except Exception as e:
-                logger.error(f"❌ Bot轮询失败 (尝试 {self._current_retry}): {e}")
+                error_msg = str(e).lower()
+                logger.error(f"❌ Bot轮询失败: {e}")
 
                 if self._current_retry >= self._max_retries:
-                    logger.critical(
-                        f"🚨 Bot启动重试{self._max_retries}次后失败，停止尝试"
-                    )
+                    logger.critical(f"🚨 重试{self._max_retries}次后失败，停止尝试")
                     break
 
-                delay = self._base_delay * (2 ** (self._current_retry - 1))
-                delay = min(delay, 300)
+                # 判断错误类型，设置不同的延迟
+                if "flood control" in error_msg or "too many requests" in error_msg:
+                    delay = 60  # Flood control 等待60秒
+                    logger.warning(f"🚨 检测到Flood Control，等待{delay}秒...")
+                else:
+                    delay = min(self._base_delay * (2 ** (self._current_retry - 1)), 120)
+                    logger.info(f"⏳ 使用指数退避，等待{delay:.1f}秒...")
 
-                logger.info(f"⏳ {delay:.1f}秒后第{self._current_retry + 1}次重试...")
+                logger.info(f"第{self._current_retry + 1}次重试将在{delay:.1f}秒后进行")
                 await asyncio.sleep(delay)
+
+        # 确保会话关闭
+        try:
+            await self.bot.session.close()
+            logger.info("✅ Bot会话已关闭")
+        except Exception as e:
+            logger.warning(f"⚠️ 关闭会话时出错: {e}")
 
     async def stop(self):
         """停止Bot"""
