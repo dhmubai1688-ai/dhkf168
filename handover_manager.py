@@ -687,12 +687,20 @@ class HandoverManager:
     ) -> bool:
         """创建用户新周期（自动使缓存失效）"""
         if start_time is None:
-            start_time = db.get_beijing_time()
+            start_time = self.get_beijing_time()
 
+        # ===== 修复：转换为无时区时间 =====
+        # 确保插入数据库的时间不带 tzinfo，防止 PostgreSQL 驱动进行不必要的时区转换
+        if start_time.tzinfo is not None:
+            # 转换为无时区时间（去除时区信息）
+            start_time = start_time.replace(tzinfo=None)
+
+        # 根据 period_type 判定白班或晚班
         shift_type = "night" if "night" in period_type else "day"
 
         try:
-            await db.execute_with_retry(
+            # 使用带重试机制的执行器
+            await self.execute_with_retry(
                 "创建用户周期",
                 """
                 INSERT INTO user_handover_cycles 
@@ -707,15 +715,15 @@ class HandoverManager:
                 business_date,
                 shift_type,
                 cycle,
-                start_time,
+                start_time,  # 传入已处理的无时区时间
             )
 
-            # 使相关缓存失效
+            # 联动操作：使该用户的周期相关缓存失效，确保下次查询时从数据库拉取最新状态
             await self._invalidate_user_cycle_cache(chat_id, user_id)
             return True
 
         except Exception as e:
-            logger.error(f"创建用户周期失败 {chat_id}-{user_id}: {e}")
+            logger.error(f"❌ 创建用户周期失败 {chat_id}-{user_id}: {e}")
             return False
 
     async def update_user_cycle_time(
