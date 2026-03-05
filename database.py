@@ -2,12 +2,14 @@ import logging
 import asyncio
 import time
 import json
+import random
 from datetime import datetime, timedelta, date
 from config import beijing_tz
 from typing import Dict, Any, List, Optional, Union
 from config import Config, beijing_tz
 import asyncpg
 from asyncpg.pool import Pool
+from fault_tolerance import with_deadlock_retry, db_circuit_breaker, Watchdog
 
 logger = logging.getLogger("GroupCheckInBot")
 
@@ -115,73 +117,110 @@ class PostgreSQLDatabase:
         timeout: int = 30,
         slow_threshold: float = 1.0,
     ):
-        """带重试和超时的查询执行"""
-        if not await self._ensure_healthy_connection():
-            raise ConnectionError("数据库连接不健康")
+        """带重试和超时的查询执行（增强版：添加死锁重试）"""
 
-        if sum([fetch, fetchrow, fetchval]) > 1:
-            raise ValueError("只能指定一种查询类型: fetch, fetchrow 或 fetchval")
+        # 使用看门狗保护整个操作，防止协程由于未知原因无限挂起
+        watchdog = Watchdog(timeout=timeout + 5, name=operation_name)
 
-        for attempt in range(max_retries + 1):
-            start_time = time.time()
-            try:
-                async with self.pool.acquire() as conn:
-                    await conn.execute(f"SET statement_timeout = {timeout * 1000}")
+        async def _execute():
+            if not await self._ensure_healthy_connection():
+                raise ConnectionError("数据库连接不健康")
 
-                    if fetch:
-                        result = await conn.fetch(query, *args)
-                    elif fetchrow:
-                        result = await conn.fetchrow(query, *args)
-                    elif fetchval:
-                        result = await conn.fetchval(query, *args)
-                    else:
-                        result = await conn.execute(query, *args)
+            if sum([fetch, fetchrow, fetchval]) > 1:
+                raise ValueError("只能指定一种查询类型: fetch, fetchrow 或 fetchval")
 
-                    execution_time = time.time() - start_time
+            for attempt in range(max_retries + 1):
+                start_time = time.time()
+                try:
+                    async with self.pool.acquire() as conn:
+                        # 喂狗：连接获取成功
+                        watchdog.feed()
 
-                    if execution_time > slow_threshold:
-                        log_level = (
-                            logging.WARNING if execution_time < 5.0 else logging.ERROR
+                        # 设置 PostgreSQL 语句级的执行超时
+                        await conn.execute(f"SET statement_timeout = {timeout * 1000}")
+
+                        # 根据指定的类型执行不同深度的 fetch 操作
+                        if fetch:
+                            result = await conn.fetch(query, *args)
+                        elif fetchrow:
+                            result = await conn.fetchrow(query, *args)
+                        elif fetchval:
+                            result = await conn.fetchval(query, *args)
+                        else:
+                            result = await conn.execute(query, *args)
+
+                        execution_time = time.time() - start_time
+                        watchdog.feed()  # 喂狗：查询完成
+
+                        # 慢查询监控与分级日志
+                        if execution_time > slow_threshold:
+                            log_level = (
+                                logging.WARNING
+                                if execution_time < 5.0
+                                else logging.ERROR
+                            )
+                            logger.log(
+                                log_level,
+                                f"⏱️ 慢查询: {operation_name} 耗时 {execution_time:.3f}秒 "
+                                f"(SQL: {query[:100]}{'...' if len(query) > 100 else ''})",
+                            )
+                        return result
+
+                except asyncpg.DeadlockDetectedError as e:
+                    # 死锁检测：数据库检测到循环依赖锁，自动进行退避重试
+                    if attempt == max_retries:
+                        logger.error(
+                            f"{operation_name} 死锁重试{max_retries}次后失败: {e}"
                         )
-                        logger.log(
-                            log_level,
-                            f"⏱️ 慢查询: {operation_name} 耗时 {execution_time:.3f}秒 "
-                            f"(SQL: {query[:100]}{'...' if len(query) > 100 else ''})",
-                        )
+                        raise
 
-                    return result
-
-            except (
-                asyncpg.PostgresConnectionError,
-                asyncpg.ConnectionDoesNotExistError,
-                asyncpg.InterfaceError,
-                ConnectionError,
-            ) as e:
-                if attempt == max_retries:
-                    logger.error(
-                        f"{operation_name} 数据库重试{max_retries}次后失败: {e}"
+                    # 指数退避 + 随机抖动（Jitter），防止多个任务在同一时刻重试造成二次死锁
+                    retry_delay = min(0.1 * (2**attempt) * (1 + random.random()), 5)
+                    logger.warning(
+                        f"🔄 检测到死锁，{retry_delay:.2f}秒后第{attempt + 1}次重试: {operation_name}"
                     )
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+                except (
+                    asyncpg.PostgresConnectionError,
+                    asyncpg.ConnectionDoesNotExistError,
+                    asyncpg.InterfaceError,
+                    ConnectionError,
+                ) as e:
+                    # 连接类异常：尝试重连并重试
+                    if attempt == max_retries:
+                        logger.error(
+                            f"{operation_name} 数据库重试{max_retries}次后失败: {e}"
+                        )
+                        raise
+
+                    retry_delay = min(1 * (2**attempt), 5)
+                    logger.warning(
+                        f"{operation_name} 数据库连接异常，{retry_delay}秒后第{attempt + 1}次重试: {e}"
+                    )
+                    await self._reconnect()
+                    await asyncio.sleep(retry_delay)
+
+                except asyncpg.QueryCanceledError:
+                    # 处理超时的取消异常
+                    logger.error(
+                        f"{operation_name} 查询超时被取消 (超时设置: {timeout}秒)"
+                    )
+                    if attempt == max_retries:
+                        raise
+                    await asyncio.sleep(1)
+
+                except Exception as e:
+                    # 业务或语法错误：不重试，直接抛出并记录
+                    if "database" in str(e).lower() or "sql" in str(e).lower():
+                        logger.error(f"{operation_name} 数据库操作失败: {e}")
+                    else:
+                        logger.error(f"{operation_name} 操作失败: {e}")
                     raise
 
-                retry_delay = min(1 * (2**attempt), 5)
-                logger.warning(
-                    f"{operation_name} 数据库连接异常，{retry_delay}秒后第{attempt + 1}次重试: {e}"
-                )
-                await self._reconnect()
-                await asyncio.sleep(retry_delay)
-
-            except asyncpg.QueryCanceledError:
-                logger.error(f"{operation_name} 查询超时被取消 (超时设置: {timeout}秒)")
-                if attempt == max_retries:
-                    raise
-                await asyncio.sleep(1)
-
-            except Exception as e:
-                if "database" in str(e).lower() or "sql" in str(e).lower():
-                    logger.error(f"{operation_name} 数据库操作失败: {e}")
-                else:
-                    logger.error(f"{operation_name} 操作失败: {e}")
-                raise
+        # 使用熔断器保护：如果数据库大面积崩溃，熔断器会快速失败，保护系统内存不被挂起的协程占满
+        return await db_circuit_breaker.call(_execute)
 
     # ========== 定期维护任务 ==========
     async def start_connection_maintenance(self):
@@ -207,69 +246,6 @@ class PostgreSQLDatabase:
                 pass
             self._maintenance_task = None
         logger.info("数据库连接维护任务已停止")
-
-    async def _connection_maintenance_loop(self):
-        """连接维护循环 - 优化版"""
-        logger.info("🚀 数据库连接维护循环已启动")
-
-        # 记录上次执行清理的时间，避免在一个小时内重复执行
-        last_cleanup_hour = -1
-
-        while self._maintenance_running:
-            try:
-                # ===== 每 60 秒执行一次的基础检查 =====
-                await asyncio.sleep(60)
-
-                # 1. 确保连接池健康
-                if not await self._ensure_healthy_connection():
-                    logger.warning("⚠️ 连接维护: 数据库连接不健康，跳过本轮检查")
-                    continue
-
-                # 2. 清理内存缓存
-                cache_before = len(self._cache)
-                await self.cleanup_cache()
-                cache_after = len(self._cache)
-                if cache_before != cache_after:
-                    logger.debug(f"🧹 缓存清理: {cache_before} -> {cache_after}")
-
-                # 3. 监控连接池状态（SQL 视图层面的统计）
-                await self._monitor_pool_health()
-
-                # ===== 每小时执行一次的深度维护 =====
-                current_hour = datetime.now().hour
-                if current_hour != last_cleanup_hour:
-                    last_cleanup_hour = current_hour
-
-                    try:
-                        # 清理常规业务旧数据
-                        daily_deleted = await self.cleanup_old_data(
-                            days=Config.DATA_RETENTION_DAYS
-                        )
-
-                        # 清理旧的重置日志（保留 90 天）
-                        logs_deleted = await self.cleanup_old_reset_logs(days=90)
-
-                        if daily_deleted > 0 or logs_deleted > 0:
-                            logger.info(
-                                f"🧹 每小时清理完成: "
-                                f"业务数据={daily_deleted}, 重置日志={logs_deleted}"
-                            )
-                        else:
-                            logger.debug("✅ 每小时清理完成，无数据需要清理")
-
-                    except Exception as e:
-                        logger.error(f"❌ 每小时数据清理失败: {e}")
-
-            except asyncio.CancelledError:
-                logger.info("🛑 数据库连接维护任务被取消")
-                break
-
-            except Exception as e:
-                logger.error(f"❌ 连接维护任务异常: {e}")
-                # 发生异常时等待 30 秒，避免疯狂重试造成日志刷屏
-                await asyncio.sleep(30)
-
-        logger.info("🏁 数据库连接维护循环已结束")
 
     async def _monitor_pool_health(self):
         """监控数据库健康状态（修复版）"""

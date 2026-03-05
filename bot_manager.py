@@ -6,6 +6,8 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import Config
 
+from fault_tolerance import telegram_circuit_breaker
+
 logger = logging.getLogger("GroupCheckInBot")
 
 
@@ -198,6 +200,38 @@ class RobustBotManager:
                     return False
 
         return False
+
+    async def send_message_with_protection(
+        self, chat_id: int, text: str, **kwargs
+    ) -> bool:
+        """
+        带熔断器保护的消息发送
+
+        使用熔断器防止Telegram API故障导致雪崩效应
+
+        Args:
+            chat_id: 目标聊天ID
+            text: 消息文本
+            **kwargs: 其他参数 (parse_mode, reply_markup等)
+
+        Returns:
+            bool: 是否发送成功
+        """
+
+        async def _send():
+            """实际发送函数"""
+            try:
+                await self.bot.send_message(chat_id, text, **kwargs)
+                return True
+            except Exception as e:
+                logger.error(f"❌ 发送消息失败: {e}")
+                raise  # 重新抛出异常，让熔断器捕获
+
+        try:
+            return await telegram_circuit_breaker.call(_send)
+        except Exception as e:
+            logger.error(f"❌ 熔断器保护的消息发送失败: {e}")
+            return False
 
     def is_healthy(self) -> bool:
         """检查Bot健康状态"""
