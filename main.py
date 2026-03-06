@@ -82,6 +82,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
 
+# 在现有的导入后面添加
+from dual_shift_reset import (
+    _export_monthly_data_concurrent,
+    _export_yesterday_data_concurrent,
+)
+
+
 from io import StringIO
 
 bot = None
@@ -432,75 +439,6 @@ async def generate_monthly_report(chat_id: int, year: int = None, month: int = N
     report += f"💡 <i>注：本报告基于月度统计表生成，不受日常重置操作影响</i>"
 
     return report
-
-
-# ========== 导出月度数据函数 =========
-async def export_monthly_csv(
-    chat_id: int,
-    year: int = None,
-    month: int = None,
-    to_admin_if_no_group: bool = True,
-    file_name: str = None,
-):
-    """导出月度数据为 CSV 并推送"""
-    if year is None or month is None:
-        today = db.get_beijing_time()
-        year = today.year
-        month = today.month
-
-    if not file_name:
-        file_name = f"group_{chat_id}_monthly_{year:04d}{month:02d}.csv"
-
-    csv_content = await optimized_monthly_export(chat_id, year, month)
-
-    if not csv_content:
-        await bot.send_message(chat_id, f"⚠️ {year}年{month}月没有数据需要导出")
-        return
-
-    temp_file = f"temp_{file_name}"
-    try:
-        async with aiofiles.open(temp_file, "w", encoding="utf-8-sig") as f:
-            await f.write(csv_content)
-
-        chat_title = str(chat_id)
-        try:
-            chat_info = await bot.get_chat(chat_id)
-            chat_title = chat_info.title or chat_title
-        except:
-            pass
-
-        caption = (
-            f"📊 月度数据导出\n"
-            f"🏢 群组：<code>{chat_title}</code>\n"
-            f"📅 统计月份：<code>{year}年{month}月</code>\n"
-            f"⏰ 导出时间：<code>{db.get_beijing_time().strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-            f"{MessageFormatter.create_dashed_line()}\n"
-            f"💾 包含每个用户的月度活动统计"
-        )
-
-        try:
-            csv_input_file = FSInputFile(temp_file, filename=file_name)
-            await bot.send_document(
-                chat_id, csv_input_file, caption=caption, parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"❌ 发送到当前聊天失败: {e}")
-
-        await notification_service.send_document(
-            chat_id, FSInputFile(temp_file, filename=file_name), caption=caption
-        )
-
-        logger.info(f"✅ 月度数据导出并推送完成: {file_name}")
-
-    except Exception as e:
-        logger.error(f"❌ 月度导出过程出错: {e}")
-        await bot.send_message(chat_id, f"❌ 月度导出失败：{e}")
-    finally:
-        try:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-        except:
-            pass
 
 
 # ========== 活动恢复函数 ==========
@@ -4400,144 +4338,10 @@ async def cmd_export(message: types.Message):
         )
 
 
-@track_performance("optimized_monthly_export")
-async def optimized_monthly_export(chat_id: int, year: int, month: int):
-    """高性能月度数据导出"""
-    try:
-        activity_limits = await db.get_activity_limits_cached()
-        activity_names = sorted(activity_limits.keys())
-
-        monthly_stats = await db.get_monthly_statistics(chat_id, year, month)
-        if not monthly_stats:
-            logger.warning(f"月度统计表中没有找到 {year}年{month}月 的数据")
-            return None
-
-        shift_display_map = {
-            "day": "白班",
-            "night": "夜班",
-            "night_last": "夜班",
-            "night_tonight": "夜班",
-        }
-
-        csv_buffer = StringIO()
-        writer = csv.writer(csv_buffer, lineterminator="\n")
-
-        headers = ["用户ID", "用户昵称", "班次"]
-        for act in activity_names:
-            headers.extend([f"{act}次数", f"{act}总时长"])
-
-        headers.extend(
-            [
-                "活动次数总计",
-                "活动用时总计",
-                "罚款总分",
-                "超时次数",
-                "总超时时间",
-                "工作天数",
-                "工作时长",
-                "上班次数",
-                "下班次数",
-                "上班罚款",
-                "下班罚款",
-                "迟到次数",
-                "早退次数",
-            ]
-        )
-        writer.writerow(headers)
-
-        format_time = db.format_time_for_csv
-        rows = []
-
-        for user_stat in monthly_stats:
-            if not isinstance(user_stat, dict):
-                continue
-
-            required_fields = [
-                "work_start_count",
-                "work_end_count",
-                "work_start_fines",
-                "work_end_fines",
-                "late_count",
-                "early_count",
-                "work_days",
-                "work_hours",
-            ]
-            for field in required_fields:
-                if field not in user_stat:
-                    user_stat[field] = 0
-
-            user_id = str(user_stat.get("user_id", ""))
-            nickname = user_stat.get("nickname", f"用户{user_id}")
-            shift = user_stat.get("shift", "day")
-            shift_display = shift_display_map.get(shift, "白班")
-
-            row = [user_id, nickname, shift_display]
-
-            activities = user_stat.get("activities", {})
-            if isinstance(activities, str):
-                try:
-                    activities = json.loads(activities)
-                except:
-                    activities = {}
-            elif not isinstance(activities, dict):
-                activities = {}
-
-            for act in activity_names:
-                act_info = activities.get(act, {})
-                if isinstance(act_info, dict):
-                    count = act_info.get("count", 0)
-                    time_sec = act_info.get("time", 0)
-                else:
-                    count, time_sec = 0, 0
-                row.extend([count, format_time(time_sec)])
-
-            row.extend(
-                [
-                    user_stat.get("total_activity_count", 0),
-                    format_time(user_stat.get("total_accumulated_time", 0)),
-                    user_stat.get("total_fines", 0),
-                    user_stat.get("overtime_count", 0),
-                    format_time(user_stat.get("total_overtime_time", 0)),
-                    user_stat.get("work_days", 0),
-                    format_time(user_stat.get("work_hours", 0)),
-                    user_stat.get("work_start_count", 0),
-                    user_stat.get("work_end_count", 0),
-                    user_stat.get("work_start_fines", 0),
-                    user_stat.get("work_end_fines", 0),
-                    user_stat.get("late_count", 0),
-                    user_stat.get("early_count", 0),
-                ]
-            )
-
-            rows.append(row)
-
-        writer.writerows(rows)
-
-        csv_content = csv_buffer.getvalue()
-        csv_buffer.close()
-
-        total_records = len(rows)
-        total_users = len(set(row[0] for row in rows))
-
-        logger.info(
-            f"✅ 月度导出完成\n"
-            f"   ├─ 统计月份: {year}年{month}月\n"
-            f"   ├─ 用户数量: {total_users}\n"
-            f"   ├─ 数据行数: {total_records}\n"
-            f"   └─ 文件大小: {len(csv_content)} 字节"
-        )
-        return csv_content
-
-    except Exception as e:
-        logger.error(f"❌ 月度导出失败: {e}")
-        logger.error(traceback.format_exc())
-        return None
-
-
 @admin_required
 @rate_limit(rate=2, per=60)
 async def cmd_monthlyreport(message: types.Message):
-    """生成月度报告"""
+    """生成月度报告（使用新架构导出）"""
     args = message.text.split()
     chat_id = message.chat.id
 
@@ -4564,16 +4368,51 @@ async def cmd_monthlyreport(message: types.Message):
     )
 
     try:
+        # 先生成报告（保持原样）
         report = await generate_monthly_report(chat_id, year, month)
+
         if report:
+            # 发送报告
             await message.answer(
                 report, parse_mode="HTML", reply_to_message_id=message.message_id
             )
 
-            await export_monthly_csv(chat_id, year, month)
-            await message.answer(
-                "✅ 月度数据已导出并推送！", reply_to_message_id=message.message_id
-            )
+            # ✅ 统一使用新架构导出数据
+            if year and month:
+                logger.info(
+                    f"📊 管理员 {message.from_user.id} 请求导出 {year}年{month}月 数据"
+                )
+
+                # 使用新架构导出
+                success = await _export_monthly_data_concurrent(
+                    chat_id=chat_id, year=year, month=month
+                )
+
+                if success:
+                    await message.answer(
+                        "✅ 月度数据已导出并推送！",
+                        reply_to_message_id=message.message_id,
+                    )
+                else:
+                    await message.answer(
+                        "⚠️ 数据导出失败，但报告已生成\n" "请检查日志或联系开发人员",
+                        reply_to_message_id=message.message_id,
+                    )
+            else:
+                # 如果没有指定年月，使用当前月份
+                today = db.get_beijing_time()
+                year = today.year
+                month = today.month
+
+                success = await _export_monthly_data_concurrent(
+                    chat_id=chat_id, year=year, month=month
+                )
+
+                if success:
+                    await message.answer(
+                        f"✅ {year}年{month}月数据已导出并推送！",
+                        reply_to_message_id=message.message_id,
+                    )
         else:
             time_desc = f"{year}年{month}月" if year and month else "最近一个月"
             await message.answer(
@@ -4581,6 +4420,8 @@ async def cmd_monthlyreport(message: types.Message):
             )
 
     except Exception as e:
+        logger.error(f"❌ 生成月度报告失败: {e}")
+        logger.error(traceback.format_exc())
         await message.answer(
             f"❌ 生成月度报告失败：{e}", reply_to_message_id=message.message_id
         )
@@ -4631,9 +4472,10 @@ async def get_monthly_stats_compatible(chat_id: int, target_date: date) -> List[
 @admin_required
 @rate_limit(rate=2, per=60)
 async def cmd_exportmonthly(message: types.Message):
-    """导出月度数据"""
+    """导出月度数据（使用新架构）"""
     args = message.text.split()
     chat_id = message.chat.id
+    uid = message.from_user.id
 
     year = None
     month = None
@@ -4643,19 +4485,64 @@ async def cmd_exportmonthly(message: types.Message):
             year = int(args[1])
             month = int(args[2])
             if month < 1 or month > 12:
-                await message.answer("❌ 月份必须在1-12之间")
+                await message.answer(
+                    "❌ 月份必须在1-12之间", reply_to_message_id=message.message_id
+                )
                 return
         except ValueError:
-            await message.answer("❌ 请输入有效的年份和月份")
+            await message.answer(
+                "❌ 请输入有效的年份和月份", reply_to_message_id=message.message_id
+            )
             return
+    else:
+        # 如果没有指定，默认导出上个月
+        today = db.get_beijing_time()
+        if today.month == 1:
+            year = today.year - 1
+            month = 12
+        else:
+            year = today.year
+            month = today.month - 1
 
-    await message.answer("⏳ 正在导出月度数据，请稍候...")
+        await message.answer(
+            f"📅 未指定月份，默认导出 {year}年{month}月 数据",
+            reply_to_message_id=message.message_id,
+        )
+
+    await message.answer(
+        f"⏳ 正在导出 {year}年{month}月 数据，请稍候...",
+        reply_to_message_id=message.message_id,
+    )
 
     try:
-        await export_monthly_csv(chat_id, year, month)
-        await message.answer("✅ 月度数据已导出并推送！")
+        # ✅ 使用新架构导出
+        success = await _export_monthly_data_concurrent(
+            chat_id=chat_id, year=year, month=month
+        )
+
+        if success:
+            logger.info(
+                f"👑 管理员 {uid} 成功导出群组 {chat_id} 的 {year}年{month}月 数据"
+            )
+            await message.answer(
+                f"✅ {year}年{month}月 数据已导出并推送！",
+                reply_to_message_id=message.message_id,
+            )
+        else:
+            logger.error(
+                f"❌ 管理员 {uid} 导出群组 {chat_id} 的 {year}年{month}月 数据失败"
+            )
+            await message.answer(
+                f"❌ {year}年{month}月 数据导出失败，请检查日志",
+                reply_to_message_id=message.message_id,
+            )
+
     except Exception as e:
-        await message.answer(f"❌ 导出月度数据失败：{e}")
+        logger.error(f"❌ 导出月度数据失败: {e}")
+        logger.error(traceback.format_exc())
+        await message.answer(
+            f"❌ 导出月度数据失败：{e}", reply_to_message_id=message.message_id
+        )
 
 
 @admin_required
@@ -7524,7 +7411,7 @@ async def export_and_push_csv(
 
             # ===== 使用 local_target_date 副本，避免修改原始变量 =====
             working_target_date = local_target_date
-            
+
             if working_target_date is not None:
                 if hasattr(working_target_date, "date"):
                     working_target_date = working_target_date.date()
@@ -7554,7 +7441,9 @@ async def export_and_push_csv(
 
                 working_target_date = export_date
             else:
-                logger.info(f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}")
+                logger.info(
+                    f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}"
+                )
 
             # 喂狗
             watchdog.feed()
@@ -7563,7 +7452,9 @@ async def export_and_push_csv(
             current_file_name = local_file_name
             if not current_file_name:
                 if local_is_daily_reset:
-                    current_file_name = f"daily_backup_{local_chat_id}_{working_target_date:%Y%m%d}.csv"
+                    current_file_name = (
+                        f"daily_backup_{local_chat_id}_{working_target_date:%Y%m%d}.csv"
+                    )
                 else:
                     current_file_name = (
                         f"manual_export_{local_chat_id}_{beijing_now:%Y%m%d_%H%M%S}.csv"
@@ -7575,7 +7466,7 @@ async def export_and_push_csv(
 
             # ===== 使用 local_from_monthly_table 副本和 working_target_date =====
             current_from_monthly_table = local_from_monthly_table
-            
+
             if current_from_monthly_table:
                 logger.info(f"📊 [{operation_id}] 尝试从月度表获取数据")
                 try:
@@ -7637,7 +7528,9 @@ async def export_and_push_csv(
             watchdog.feed()
 
             if not group_stats:
-                logger.warning(f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有数据需要导出")
+                logger.warning(
+                    f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有数据需要导出"
+                )
                 if not local_is_daily_reset:
                     await bot_manager.send_message_with_retry(
                         local_chat_id, "⚠️ 当前没有数据需要导出"
@@ -7943,6 +7836,7 @@ async def export_and_push_csv(
             pass
         return False
 
+
 # ========== 定时任务 ==========
 async def daily_reset_task():
     """每日重置监控任务 - 纯双班模式"""
@@ -8111,7 +8005,7 @@ async def health_monitoring_task():
 
 
 async def monthly_maintenance_task():
-    """每月维护任务"""
+    """每月维护任务 - 整合新导出架构"""
     logger.info("📅 月度维护任务已启动")
 
     last_cleanup_date = None
@@ -8122,6 +8016,7 @@ async def monthly_maintenance_task():
             now = db.get_beijing_time()
             today = now.date()
 
+            # ===== 清理任务（保持不变）=====
             if (
                 now.hour == Config.CLEANUP_HOUR
                 and now.minute == Config.CLEANUP_MINUTE
@@ -8138,7 +8033,6 @@ async def monthly_maintenance_task():
                     daily_deleted = await db.cleanup_old_data(
                         Config.DATA_RETENTION_DAYS
                     )
-
                     monthly_deleted = await db.cleanup_monthly_data(
                         Config.MONTHLY_DATA_RETENTION_DAYS
                     )
@@ -8148,9 +8042,9 @@ async def monthly_maintenance_task():
                         f"   ├─ 日常数据: {daily_deleted} 条\n"
                         f"   └─ 月度数据: {monthly_deleted} 条"
                     )
-
                     last_cleanup_date = today
 
+            # ===== 月度导出任务（每月1号执行）- 直接调用 _export_yesterday_data_concurrent =====
             if (
                 now.day == 1
                 and now.hour == Config.MONTHLY_EXPORT_HOUR
@@ -8159,6 +8053,7 @@ async def monthly_maintenance_task():
             ):
 
                 if Config.MONTHLY_EXPORT_ENABLED:
+                    # 计算上个月的年月
                     if now.month == 1:
                         year = now.year - 1
                         month = 12
@@ -8176,49 +8071,22 @@ async def monthly_maintenance_task():
                         try:
                             await db.init_group(chat_id)
 
-                            file_name = f"monthly_{chat_id}_{year}{month:02d}.csv"
-                            csv_content = await optimized_monthly_export(
-                                chat_id, year, month
+                            # ✅ 直接调用 _export_yesterday_data_concurrent 并指定 from_monthly=True
+                            target_date = date(year, month, 1)
+                            success = await _export_yesterday_data_concurrent(
+                                chat_id=chat_id,
+                                target_date=target_date,
+                                from_monthly=True,  # 指定从月度表导出
                             )
 
-                            if csv_content:
-                                temp_file = f"temp_{file_name}"
-                                async with aiofiles.open(
-                                    temp_file, "w", encoding="utf-8-sig"
-                                ) as f:
-                                    await f.write(csv_content)
-
-                                try:
-                                    chat_info = await bot.get_chat(chat_id)
-                                    chat_title = chat_info.title or str(chat_id)
-                                except:
-                                    chat_title = str(chat_id)
-
-                                caption = (
-                                    f"📊 月度数据导出\n"
-                                    f"🏢 群组：<code>{chat_title}</code>\n"
-                                    f"📅 统计月份：<code>{year}年{month}月</code>\n"
-                                    f"⏰ 导出时间：<code>{now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
-                                    f"{MessageFormatter.create_dashed_line()}\n"
-                                    f"💾 包含跨天夜班的完整工作时长"
-                                )
-
-                                input_file = FSInputFile(temp_file, filename=file_name)
-                                await bot.send_document(
-                                    chat_id,
-                                    input_file,
-                                    caption=caption,
-                                    parse_mode="HTML",
-                                )
-
-                                os.remove(temp_file)
-
+                            if success:
                                 success_count += 1
-                                logger.info(f"✅ 群组 {chat_id} 导出成功")
+                                logger.info(f"✅ 群组 {chat_id} 月度导出成功")
                             else:
-                                logger.debug(f"📭 群组 {chat_id} 本月无数据")
+                                failed_count += 1
+                                logger.error(f"❌ 群组 {chat_id} 月度导出失败")
 
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(1)  # 避免请求过频
 
                         except Exception as e:
                             failed_count += 1
@@ -8231,7 +8099,6 @@ async def monthly_maintenance_task():
                         f"   ├─ 失败: {failed_count} 个群组\n"
                         f"   └─ 总计: {len(all_groups)} 个群组"
                     )
-
                     last_export_date = today
 
             await asyncio.sleep(60)
