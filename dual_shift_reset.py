@@ -619,7 +619,6 @@ async def _complete_missing_work_ends(
             for row in rows:
                 task = asyncio.create_task(
                     _complete_single_work_end_optimized(
-                        conn,
                         chat_id,
                         row,
                         target_date,
@@ -673,15 +672,17 @@ async def _complete_missing_work_ends(
 
 # ========== 新增：优化版补全单个下班记录 ==========
 async def _complete_single_work_end_optimized(
-    conn,
-    chat_id: int,
+    chat_id: int,  # 移除 conn 参数，改为 chat_id
     row: dict,
     target_date: date,
     auto_end_time: str,
     shift_config: dict,
     work_fine_rates: Dict[str, int],
 ) -> Dict[str, Any]:
-    """优化版：补全单个用户的下班记录"""
+    """
+    优化版：补全单个用户的下班记录
+    每个任务使用独立的数据库连接，避免连接冲突
+    """
     result = {
         "user_id": row["user_id"],
         "shift": row["shift"],
@@ -692,13 +693,15 @@ async def _complete_single_work_end_optimized(
     }
 
     try:
+        # 根据班次确定期望下班时间和日期
         if row["shift"] == "day":
             expected_end_time = shift_config.get("day_end", "18:00")
             work_end_date = target_date
-        else:
+        else:  # night
             expected_end_time = shift_config.get("day_start", "09:00")
             work_end_date = target_date + timedelta(days=1)
 
+        # 解析时间
         work_start_time = datetime.strptime(row["work_start_time"], "%H:%M").time()
         work_start_dt = datetime.combine(target_date, work_start_time)
 
@@ -710,6 +713,7 @@ async def _complete_single_work_end_optimized(
             work_end_date, datetime.strptime(auto_end_time, "%H:%M").time()
         )
 
+        # 计算时间差和罚款
         time_diff_seconds = int((auto_end_dt - expected_end_dt).total_seconds())
         time_diff_minutes = time_diff_seconds / 60
 
@@ -720,8 +724,10 @@ async def _complete_single_work_end_optimized(
                 if abs(time_diff_minutes) >= threshold:
                     fine_amount = work_fine_rates[str(threshold)]
 
+        # 计算工作时长
         work_duration = int((auto_end_dt - work_start_dt).total_seconds())
 
+        # 确定状态描述
         if time_diff_seconds < 0:
             status = f"🚨 自动下班（早退 {abs(time_diff_minutes):.1f}分钟）"
         elif time_diff_seconds > 0:
@@ -729,36 +735,42 @@ async def _complete_single_work_end_optimized(
         else:
             status = "✅ 自动下班（准时）"
 
-        await db.add_work_record(
-            chat_id=chat_id,
-            user_id=row["user_id"],
-            record_date=target_date,
-            checkin_type="work_end",
-            checkin_time=auto_end_time,
-            status=status,
-            time_diff_minutes=time_diff_minutes,
-            fine_amount=fine_amount,
-            shift=row["shift"],
-            shift_detail=row.get("shift_detail", row["shift"]),
-        )
+        # ===== 关键修改：每个任务使用自己的连接进行数据库操作 =====
+        async with db.pool.acquire() as conn:
+            async with conn.transaction():
+                # 1. 添加上班记录
+                await db.add_work_record(
+                    chat_id=chat_id,
+                    user_id=row["user_id"],
+                    record_date=target_date,
+                    checkin_type="work_end",
+                    checkin_time=auto_end_time,
+                    status=status,
+                    time_diff_minutes=time_diff_minutes,
+                    fine_amount=fine_amount,
+                    shift=row["shift"],
+                    shift_detail=row.get("shift_detail", row["shift"]),
+                )
 
-        await conn.execute(
-            """
-            INSERT INTO daily_statistics
-            (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
-            VALUES ($1, $2, $3, 'work_hours', $4, $5)
-            ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
-            DO UPDATE SET
-                accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            chat_id,
-            row["user_id"],
-            target_date,
-            work_duration,
-            row["shift"],
-        )
+                # 2. 更新日统计
+                await conn.execute(
+                    """
+                    INSERT INTO daily_statistics
+                    (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
+                    VALUES ($1, $2, $3, 'work_hours', $4, $5)
+                    ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
+                    DO UPDATE SET
+                        accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    chat_id,
+                    row["user_id"],
+                    target_date,
+                    work_duration,
+                    row["shift"],
+                )
 
+        # 记录结果
         result["fine"] = fine_amount
         result["success"] = True
 
