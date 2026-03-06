@@ -826,77 +826,165 @@ async def _complete_single_work_end(
 
 
 # ========== 5. 导出数据 ==========
+# ===== 导出锁管理 =====
+_export_locks: Dict[str, asyncio.Lock] = {}
+_export_locks_guard = asyncio.Lock()
+_export_semaphore = asyncio.Semaphore(3)
+
+
+async def _get_export_lock(key: str) -> asyncio.Lock:
+    """获取任务锁（不存在则创建）"""
+    async with _export_locks_guard:
+        lock = _export_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _export_locks[key] = lock
+        return lock
+
+
+async def _cleanup_export_lock(key: str):
+    """清理任务锁（避免字典无限增长）"""
+    async with _export_locks_guard:
+        lock = _export_locks.get(key)
+        if lock and not lock.locked():
+            _export_locks.pop(key, None)
+
+
 async def _export_yesterday_data_concurrent(
-    chat_id: int, target_date: date, from_monthly: bool = False
+    chat_id: int,
+    target_date: date,
+    from_monthly: bool = False,
 ) -> bool:
-    """并发导出数据，成功一次就推送"""
+    """
+    企业级稳定导出逻辑 - 支持日常/月度导出
+
+    Args:
+        chat_id: 群组ID
+        target_date: 目标日期
+        from_monthly: 是否从月度表导出（True=月度表，False=日常表）
+    """
     from main import export_and_push_csv
+    from database import db
 
-    source = "月度表" if from_monthly else "日常表"
+    export_key = f"{chat_id}:{target_date}"
 
-    # 使用锁确保只有一个任务能执行推送
-    push_lock = asyncio.Lock()
-    push_completed = False
+    # 文件名区分月度/日常
+    prefix = "monthly" if from_monthly else "daily"
+    file_name = f"{prefix}_backup_{chat_id}_{target_date.strftime('%Y%m%d')}.csv"
 
-    async def task_wrapper(attempt: int) -> bool:
-        nonlocal push_completed
+    export_lock = await _get_export_lock(export_key)
 
-        file_name = f"dual_shift_backup_{chat_id}_{target_date.strftime('%Y%m%d')}.csv"
+    async with export_lock:
+        async with _export_semaphore:
+            try:
+                shift_config = await db.get_shift_config(chat_id)
+                day_start = shift_config.get("day_start", "09:00")
+                day_end = shift_config.get("day_end", "21:00")
 
-        try:
-            # 执行导出，但还不确定是否推送
-            result = await export_and_push_csv(
-                chat_id=chat_id,
-                target_date=target_date,
-                file_name=file_name,
-                is_daily_reset=True,
-                from_monthly_table=True,
-                push_file=False,  # 先不推送，只生成数据
-            )
+                source = "月度表" if from_monthly else "日常表"
 
-            if result:
-                # 数据生成成功，现在决定是否推送
-                should_push = False
-                async with push_lock:
-                    if not push_completed:
-                        should_push = True
-                        push_completed = True
+                # 对于月度导出，目标日期应该是月份的第一天
+                display_desc = (
+                    f"{target_date.year}年{target_date.month}月"
+                    if from_monthly
+                    else str(target_date)
+                )
 
-                if should_push:
-                    # 需要推送：重新调用但只推送（可以优化为直接使用已生成的文件）
-                    await export_and_push_csv(
-                        chat_id=chat_id,
-                        target_date=target_date,
-                        file_name=file_name,
-                        is_daily_reset=True,
-                        from_monthly_table=True,
-                        push_file=True,
+                logger.info(
+                    f"📊 [数据导出] 群组 {chat_id}\n"
+                    f"   ├─ 目标{'月份' if from_monthly else '日期'}: {display_desc}\n"
+                    f"   ├─ 数据来源: {source}\n"
+                    f"   └─ 班次: 白班 {day_start}-{day_end} 夜班 {day_end}-{day_start}"
+                )
+
+                max_attempts = 3
+
+                for attempt in range(max_attempts):
+                    try:
+                        logger.info(
+                            f"🔄 [数据导出] 群组{chat_id} 第 {attempt+1}/{max_attempts} 次尝试 ({source})"
+                        )
+
+                        result = await export_and_push_csv(
+                            chat_id=chat_id,
+                            to_admin_if_no_group=True,
+                            file_name=file_name,
+                            target_date=target_date,
+                            is_daily_reset=not from_monthly,  # 只有日常重置才是 True
+                            from_monthly_table=from_monthly,  # ✅ 正确传递参数
+                            push_file=True,
+                        )
+
+                        if result:
+                            logger.info(
+                                f"✅ [数据导出] 群组 {chat_id} 导出成功\n"
+                                f"   ├─ 目标: {display_desc}\n"
+                                f"   ├─ 来源: {source}\n"
+                                f"   └─ 文件: {file_name}"
+                            )
+                            return True
+
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            f"⏰ [数据导出] 群组{chat_id} 第{attempt+1}次尝试超时"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"⚠️ [数据导出] 群组{chat_id} 第{attempt+1}次失败: {e}"
+                        )
+                        if attempt < max_attempts - 1:
+                            logger.exception(e)
+
+                    if attempt < max_attempts - 1:
+                        delay = 2**attempt
+                        logger.info(f"⏳ {delay}s 后重试")
+                        await asyncio.sleep(delay)
+
+                logger.error(
+                    f"❌ [数据导出] 群组{chat_id} 导出失败\n"
+                    f"   ├─ 目标: {display_desc}\n"
+                    f"   ├─ 来源: {source}\n"
+                    f"   └─ 文件: {file_name}"
+                )
+
+                try:
+                    from utils import notification_service
+
+                    await notification_service.send_notification(
+                        chat_id=None,
+                        text=(
+                            f"⚠️ 数据导出失败\n\n"
+                            f"群组 {chat_id}\n"
+                            f"目标: {display_desc}\n"
+                            f"来源: {source}\n"
+                            f"CSV 导出失败，请检查数据库。"
+                        ),
+                        notification_type="admin",
                     )
-                    logger.info(
-                        f"✅ [数据导出] 群组{chat_id} 第{attempt+1}次尝试成功，已推送"
-                    )
-                else:
-                    logger.info(
-                        f"✅ [数据导出] 群组{chat_id} 第{attempt+1}次尝试成功，已跳过"
-                    )
+                except Exception as notify_error:
+                    logger.error(f"❌ 通知发送失败: {notify_error}")
 
-                return True
-            return False
+                return False
 
-        except Exception as e:
-            logger.warning(f"⚠️ [数据导出] 第{attempt+1}次尝试失败: {e}")
-            return False
+            finally:
+                await _cleanup_export_lock(export_key)
 
-    tasks = [asyncio.create_task(task_wrapper(i)) for i in range(3)]
-    results = await asyncio.gather(*tasks)
-    success_count = sum(1 for r in results if r is True)
 
-    if push_completed:
-        logger.info(f"📊 [数据导出] 群组{chat_id} 共 {success_count} 次成功，已推送1次")
-        return True
-    else:
-        logger.error(f"❌ [数据导出] 群组{chat_id} 所有3次尝试均失败")
-        return False
+async def _export_monthly_data_concurrent(chat_id: int, year: int, month: int) -> bool:
+    """
+    导出月度数据 - 便捷函数
+
+    Args:
+        chat_id: 群组ID
+        year: 年份
+        month: 月份
+    """
+    target_date = date(year, month, 1)
+    return await _export_yesterday_data_concurrent(
+        chat_id=chat_id,
+        target_date=target_date,
+        from_monthly=True,  # ✅ 指定从月度表导出
+    )
 
 
 # ========== 6. 数据清理 ==========
