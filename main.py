@@ -7432,40 +7432,49 @@ async def export_and_push_csv(
 ) -> bool:
     """导出群组数据为 CSV 并推送（带看门狗保护）"""
 
-    # ===== 新增：创建看门狗 =====
-    watchdog = Watchdog(timeout=300, name=f"export_{chat_id}")  # 5分钟超时
+    # ===== 创建本地副本，避免作用域问题 =====
+    local_chat_id = chat_id
+    local_file_name = file_name
+    local_target_date = target_date
+    local_is_daily_reset = is_daily_reset
+    local_from_monthly_table = from_monthly_table
+    local_push_file = push_file
+    local_to_admin_if_no_group = to_admin_if_no_group
 
-    # ===== 新增：将原有逻辑封装为内部函数 =====
+    # ===== 创建看门狗 =====
+    watchdog = Watchdog(timeout=300, name=f"export_{local_chat_id}")  # 5分钟超时
+
+    # ===== 将原有逻辑封装为内部函数，使用本地副本 =====
     async def _export_impl():
         try:
             if not bot_manager or not bot_manager.bot:
-                logger.error(f"❌ Bot管理器未初始化，无法导出 {chat_id}")
-                if is_daily_reset:
+                logger.error(f"❌ Bot管理器未初始化，无法导出 {local_chat_id}")
+                if local_is_daily_reset:
                     return True
                 return False
 
             if not await db._ensure_healthy_connection():
-                logger.error(f"❌ 数据库连接不健康，无法导出 {chat_id}")
-                if is_daily_reset:
+                logger.error(f"❌ 数据库连接不健康，无法导出 {local_chat_id}")
+                if local_is_daily_reset:
                     return True
                 return False
 
         except Exception as e:
-            logger.error(f"❌ 前置检查失败 {chat_id}: {e}")
-            if is_daily_reset:
+            logger.error(f"❌ 前置检查失败 {local_chat_id}: {e}")
+            if local_is_daily_reset:
                 return True
             return False
 
         start_time = time.time()
-        operation_id = f"export_{chat_id}_{int(start_time)}"
-        logger.info(f"🚀 [{operation_id}] 开始导出群组 {chat_id} 的数据...")
+        operation_id = f"export_{local_chat_id}_{int(start_time)}"
+        logger.info(f"🚀 [{operation_id}] 开始导出群组 {local_chat_id} 的数据...")
 
         temp_file = None
         group_stats = []
         activity_limits = Config.DEFAULT_ACTIVITY_LIMITS.copy()
 
         try:
-            await db.init_group(chat_id)
+            await db.init_group(local_chat_id)
 
             def safe_int(value, default=0):
                 if value is None:
@@ -7504,7 +7513,7 @@ async def export_and_push_csv(
             current_minute = beijing_now.minute
             current_time_decimal = current_hour + current_minute / 60
 
-            shift_config = await db.get_shift_config(chat_id)
+            shift_config = await db.get_shift_config(local_chat_id)
             day_start_str = shift_config.get("day_start", "09:00")
             day_start_hour = int(day_start_str.split(":")[0])
             day_start_minute = int(day_start_str.split(":")[1])
@@ -7513,23 +7522,26 @@ async def export_and_push_csv(
             # 喂狗
             watchdog.feed()
 
-            if target_date is not None:
-                if hasattr(target_date, "date"):
-                    target_date = target_date.date()
-                elif not isinstance(target_date, date):
+            # ===== 使用 local_target_date 副本，避免修改原始变量 =====
+            working_target_date = local_target_date
+            
+            if working_target_date is not None:
+                if hasattr(working_target_date, "date"):
+                    working_target_date = working_target_date.date()
+                elif not isinstance(working_target_date, date):
                     try:
-                        if isinstance(target_date, str):
-                            target_date = datetime.strptime(
-                                target_date, "%Y-%m-%d"
+                        if isinstance(working_target_date, str):
+                            working_target_date = datetime.strptime(
+                                working_target_date, "%Y-%m-%d"
                             ).date()
                     except Exception:
                         logger.warning(
-                            f"⚠️ [{operation_id}] 无法解析target_date: {target_date}"
+                            f"⚠️ [{operation_id}] 无法解析target_date: {working_target_date}"
                         )
-                        target_date = None
+                        working_target_date = None
 
-            if target_date is None:
-                business_date = await db.get_business_date(chat_id)
+            if working_target_date is None:
+                business_date = await db.get_business_date(local_chat_id)
 
                 if current_time_decimal < day_start_decimal:
                     export_date = business_date - timedelta(days=1)
@@ -7540,30 +7552,35 @@ async def export_and_push_csv(
                     export_date = business_date
                     logger.info(f"☀️ [{operation_id}] 正常导出当天数据: {export_date}")
 
-                target_date = export_date
+                working_target_date = export_date
             else:
-                logger.info(f"📅 [{operation_id}] 使用指定的目标日期: {target_date}")
+                logger.info(f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}")
 
             # 喂狗
             watchdog.feed()
 
-            if not file_name:
-                if is_daily_reset:
-                    file_name = f"daily_backup_{chat_id}_{target_date:%Y%m%d}.csv"
+            # ===== 使用 local_file_name 副本和 working_target_date =====
+            current_file_name = local_file_name
+            if not current_file_name:
+                if local_is_daily_reset:
+                    current_file_name = f"daily_backup_{local_chat_id}_{working_target_date:%Y%m%d}.csv"
                 else:
-                    file_name = (
-                        f"manual_export_{chat_id}_{beijing_now:%Y%m%d_%H%M%S}.csv"
+                    current_file_name = (
+                        f"manual_export_{local_chat_id}_{beijing_now:%Y%m%d_%H%M%S}.csv"
                     )
 
             logger.info(
-                f"🔍 [{operation_id}] 获取群组 {chat_id} 的统计数据，日期: {target_date}"
+                f"🔍 [{operation_id}] 获取群组 {local_chat_id} 的统计数据，日期: {working_target_date}"
             )
 
-            if from_monthly_table:
+            # ===== 使用 local_from_monthly_table 副本和 working_target_date =====
+            current_from_monthly_table = local_from_monthly_table
+            
+            if current_from_monthly_table:
                 logger.info(f"📊 [{operation_id}] 尝试从月度表获取数据")
                 try:
                     group_stats = await get_group_stats_from_monthly(
-                        chat_id, target_date
+                        local_chat_id, working_target_date
                     )
                     if group_stats:
                         logger.info(
@@ -7572,19 +7589,19 @@ async def export_and_push_csv(
                         activity_limits = Config.DEFAULT_ACTIVITY_LIMITS.copy()
                     else:
                         logger.warning(f"⚠️ [{operation_id}] 月度表无数据，回退到常规表")
-                        from_monthly_table = False
+                        current_from_monthly_table = False
                 except Exception as e:
                     logger.error(f"❌ [{operation_id}] 从月度表获取数据失败: {e}")
-                    from_monthly_table = False
+                    current_from_monthly_table = False
 
             # 喂狗
             watchdog.feed()
 
-            if not from_monthly_table:
+            if not current_from_monthly_table:
                 try:
                     activity_task = asyncio.create_task(db.get_activity_limits_cached())
                     stats_task = asyncio.create_task(
-                        db.get_group_statistics(chat_id, target_date)
+                        db.get_group_statistics(local_chat_id, working_target_date)
                     )
 
                     results = await asyncio.gather(
@@ -7620,10 +7637,10 @@ async def export_and_push_csv(
             watchdog.feed()
 
             if not group_stats:
-                logger.warning(f"⚠️ [{operation_id}] 群组 {chat_id} 没有数据需要导出")
-                if not is_daily_reset:
+                logger.warning(f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有数据需要导出")
+                if not local_is_daily_reset:
                     await bot_manager.send_message_with_retry(
-                        chat_id, "⚠️ 当前没有数据需要导出"
+                        local_chat_id, "⚠️ 当前没有数据需要导出"
                     )
                 return True
 
@@ -7775,18 +7792,18 @@ async def export_and_push_csv(
 
             if not has_valid_data and total_records == 0:
                 logger.warning(
-                    f"⚠️ [{operation_id}] 群组 {chat_id} 没有有效数据需要导出"
+                    f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有有效数据需要导出"
                 )
-                if not is_daily_reset:
+                if not local_is_daily_reset:
                     await bot_manager.send_message_with_retry(
-                        chat_id, "⚠️ 当前没有数据需要导出"
+                        local_chat_id, "⚠️ 当前没有数据需要导出"
                     )
                 return True
 
             csv_content = csv_buffer.getvalue()
             csv_buffer.close()
 
-            temp_file = f"temp_{operation_id}_{file_name}"
+            temp_file = f"temp_{operation_id}_{current_file_name}"
 
             async def write_file_async():
                 try:
@@ -7807,11 +7824,11 @@ async def export_and_push_csv(
 
             async def get_chat_title_async():
                 try:
-                    chat_info = await bot_manager.bot.get_chat(chat_id)
-                    return chat_info.title or f"群组 {chat_id}"
+                    chat_info = await bot_manager.bot.get_chat(local_chat_id)
+                    return chat_info.title or f"群组 {local_chat_id}"
                 except Exception as e:
                     logger.warning(f"⚠️ [{operation_id}] 获取群组标题失败: {e}")
-                    return f"群组 {chat_id}"
+                    return f"群组 {local_chat_id}"
 
             write_result, chat_title = await asyncio.gather(
                 write_file_async(), get_chat_title_async()
@@ -7822,11 +7839,11 @@ async def export_and_push_csv(
 
             if not write_result:
                 await bot_manager.send_message_with_retry(
-                    chat_id, f"❌ 导出失败: 文件写入失败"
+                    local_chat_id, f"❌ 导出失败: 文件写入失败"
                 )
                 return False
 
-            display_date = target_date.strftime("%Y年%m月%d日")
+            display_date = working_target_date.strftime("%Y年%m月%d日")
             dashed_line = getattr(
                 MessageFormatter, "create_dashed_line", lambda: "─" * 30
             )()
@@ -7840,14 +7857,14 @@ async def export_and_push_csv(
                 f"💾 包含完整的工作记录统计（上班迟到/下班早退）"
             )
 
-            input_file = FSInputFile(temp_file, filename=file_name)
+            input_file = FSInputFile(temp_file, filename=current_file_name)
             send_to_group_success = False
 
-            # ===== 新增：根据 push_file 参数决定是否发送 =====
-            if push_file:
+            # ===== 根据 push_file 参数决定是否发送 =====
+            if local_push_file:
                 try:
                     success = await bot_manager.send_document_with_retry(
-                        chat_id=chat_id,
+                        chat_id=local_chat_id,
                         document=input_file,
                         caption=caption,
                         parse_mode="HTML",
@@ -7855,24 +7872,24 @@ async def export_and_push_csv(
                     if success:
                         send_to_group_success = True
                         logger.info(
-                            f"✅ [{operation_id}] CSV文件已发送到群组 {chat_id}"
+                            f"✅ [{operation_id}] CSV文件已发送到群组 {local_chat_id}"
                         )
                     else:
                         logger.error(f"❌ [{operation_id}] bot_manager 发送文档失败")
                 except Exception as e:
                     logger.error(f"❌ [{operation_id}] 发送到群组失败: {e}")
-                    if not is_daily_reset:  # 只在非自动重置时提示用户
+                    if not local_is_daily_reset:  # 只在非自动重置时提示用户
                         await bot_manager.send_message_with_retry(
-                            chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
+                            local_chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
                         )
             else:
                 logger.debug(f"⏭️ [{operation_id}] push_file=False，跳过文件发送")
                 send_to_group_success = True  # 不推送也视为成功
 
-            if to_admin_if_no_group and notification_service:
+            if local_to_admin_if_no_group and notification_service:
                 try:
                     await notification_service.send_document(
-                        chat_id, input_file, caption=caption
+                        local_chat_id, input_file, caption=caption
                     )
                 except Exception as e:
                     logger.warning(f"⚠️ [{operation_id}] 推送到通知服务失败: {e}")
@@ -7887,7 +7904,7 @@ async def export_and_push_csv(
             duration = time.time() - start_time
             logger.info(
                 f"✅ [{operation_id}] 数据导出完成\n"
-                f"   文件: {file_name}\n"
+                f"   文件: {current_file_name}\n"
                 f"   用户数: {len(unique_users)}, 数据行: {total_records}\n"
                 f"   耗时: {duration:.2f}秒"
             )
@@ -7900,7 +7917,7 @@ async def export_and_push_csv(
 
             try:
                 await bot_manager.send_message_with_retry(
-                    chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
+                    local_chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
                 )
             except:
                 pass
@@ -7913,20 +7930,18 @@ async def export_and_push_csv(
 
             return False
 
-    # ===== 新增：使用看门狗运行 =====
+    # ===== 使用看门狗运行 =====
     try:
         return await watchdog.run(_export_impl())
     except asyncio.CancelledError:
-        # ===== 修复：这里不能使用 operation_id，因为它不在作用域内 =====
-        logger.error(f"⏰ 导出操作超时，已取消 (chat_id={chat_id})")
+        logger.error(f"⏰ 导出操作超时，已取消 (chat_id={local_chat_id})")
         try:
             await bot_manager.send_message_with_retry(
-                chat_id, "⏰ 导出操作超时，请重试"
+                local_chat_id, "⏰ 导出操作超时，请重试"
             )
         except:
             pass
         return False
-
 
 # ========== 定时任务 ==========
 async def daily_reset_task():
