@@ -687,7 +687,7 @@ class HandoverManager:
     ) -> bool:
         """创建用户新周期（自动使缓存失效）"""
         if start_time is None:
-            start_time = self.get_beijing_time()
+            start_time = db.get_beijing_time()
 
         # ===== 修复：转换为无时区时间 =====
         # 确保插入数据库的时间不带 tzinfo，防止 PostgreSQL 驱动进行不必要的时区转换
