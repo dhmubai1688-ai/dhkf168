@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import time
+import os
+import sys
+import fcntl
 from typing import Optional, Dict, Any
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -15,6 +18,48 @@ class RobustBotManager:
     """健壮的Bot管理器 - 带自动重连"""
 
     def __init__(self, token: str):
+        # ===== 添加：多实例防护 =====
+        import os
+        import sys
+        import fcntl
+        import time
+
+        # 1. Render 环境实例检查：防止云平台蓝绿部署时产生两个活跃实例
+        if os.environ.get("RENDER"):
+            render_instance_index = os.environ.get("RENDER_INSTANCE_INDEX", "0")
+
+            # 只允许主实例（index=0）运行，非主实例直接优雅退出
+            if render_instance_index != "0":
+                print(f"⏭️ Render 非主实例 (index={render_instance_index})，退出")
+                time.sleep(3)
+                sys.exit(0)
+
+            print(f"✅ Render 主实例 (index=0) 继续运行")
+
+        # 2. 进程锁检查（基于 Unix 的文件锁，防止同一台机器启动多个进程）
+        lock_file = "/tmp/bot_instance.lock"
+        try:
+            self.lock_fd = open(lock_file, "w")
+            # 使用非阻塞互斥锁
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.lock_fd.write(str(os.getpid()))
+            self.lock_fd.flush()
+            print(f"✅ 获取进程锁成功，PID: {os.getpid()}")
+        except (IOError, OSError):
+            # 如果锁已被占用，尝试读取持有锁的 PID 并退出
+            try:
+                with open(lock_file, "r") as f:
+                    existing_pid = f.read().strip()
+                print(f"❌ 另一个机器人实例正在运行 (PID: {existing_pid})！退出...")
+            except:
+                print("❌ 另一个机器人实例正在运行！退出...")
+
+            # Render 环境下退出前稍作等待，防止平台重启循环过快
+            if os.environ.get("RENDER"):
+                time.sleep(5)
+            sys.exit(1)
+        # ===== 添加结束 =====
+
         self.token = token
         self.bot: Optional[Bot] = None
         self.dispatcher: Optional[Dispatcher] = None
