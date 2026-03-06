@@ -3382,9 +3382,23 @@ class PostgreSQLDatabase:
 
     # ========== 月度统计 ==========
     async def get_monthly_statistics(
-        self, chat_id: int, year: int = None, month: int = None
+        self, chat_id: int, year: int = None, month: int = None, timeout: int = 60
     ) -> List[Dict]:
-        """增强版月度统计"""
+        """
+        增强版月度统计 - 性能优化版
+        使用批量查询代替循环查询，减少数据库交互次数
+
+        Args:
+            chat_id: 群组ID
+            year: 年份
+            month: 月份
+            timeout: 查询超时时间（秒）
+        """
+        import asyncio
+        from datetime import datetime, date, timedelta
+        from config import beijing_tz
+
+        # 1. 初始化日期范围
         if year is None or month is None:
             today = self.get_beijing_time()
             year = today.year
@@ -3402,273 +3416,338 @@ class PostgreSQLDatabase:
 
         self._ensure_pool_initialized()
 
-        async with self.pool.acquire() as conn:
-            users = await conn.fetch(
-                """
-                SELECT DISTINCT user_id 
-                FROM user_activities 
-                WHERE chat_id = $1 
-                AND activity_date >= $2 
-                AND activity_date < $3
-                UNION
-                SELECT DISTINCT user_id 
-                FROM work_records 
-                WHERE chat_id = $1 
-                AND record_date >= $2 
-                AND record_date < $3
-                """,
-                chat_id,
-                month_start,
-                month_end,
-            )
-
-            result = []
-
-            for user_row in users:
-                user_id = user_row["user_id"]
-
-                user_info = await conn.fetchrow(
-                    "SELECT nickname FROM users WHERE chat_id = $1 AND user_id = $2",
-                    chat_id,
-                    user_id,
-                )
-                nickname = user_info["nickname"] if user_info else f"用户{user_id}"
-
-                activities_rows = await conn.fetch(
-                    """
-                    SELECT 
-                        activity_name,
-                        SUM(activity_count) as total_count,
-                        SUM(accumulated_time) as total_time
-                    FROM user_activities 
-                    WHERE chat_id = $1 
-                      AND user_id = $2 
-                      AND activity_date >= $3 
-                      AND activity_date < $4
-                    GROUP BY activity_name
-                    """,
-                    chat_id,
-                    user_id,
-                    month_start,
-                    month_end,
-                )
-
-                activities = {}
-                total_activity_count = 0
-                total_accumulated_time = 0
-
-                for row in activities_rows:
-                    activities[row["activity_name"]] = {
-                        "count": row["total_count"],
-                        "time": row["total_time"],
-                    }
-                    total_activity_count += row["total_count"]
-                    total_accumulated_time += row["total_time"]
-
-                fines = (
-                    await conn.fetchval(
+        try:
+            # 添加全局超时控制
+            async with asyncio.timeout(timeout):
+                async with self.pool.acquire() as conn:
+                    # ===== 1. 获取所有活跃用户 ID =====
+                    users = await conn.fetch(
                         """
-                        SELECT SUM(accumulated_time)
+                        SELECT DISTINCT user_id 
+                        FROM user_activities 
+                        WHERE chat_id = $1 
+                        AND activity_date >= $2 
+                        AND activity_date < $3
+                        UNION
+                        SELECT DISTINCT user_id 
+                        FROM work_records 
+                        WHERE chat_id = $1 
+                        AND record_date >= $2 
+                        AND record_date < $3
+                        """,
+                        chat_id,
+                        month_start,
+                        month_end,
+                    )
+
+                    if not users:
+                        logger.info(f"📭 群组 {chat_id} 在 {year}年{month}月 没有数据")
+                        return []
+
+                    user_ids = [row["user_id"] for row in users]
+
+                    # ===== 2. 批量获取用户昵称 =====
+                    user_info_rows = await conn.fetch(
+                        """
+                        SELECT user_id, nickname 
+                        FROM users 
+                        WHERE chat_id = $1 AND user_id = ANY($2::bigint[])
+                        """,
+                        chat_id,
+                        user_ids,
+                    )
+                    user_nicknames = {
+                        row["user_id"]: row["nickname"] for row in user_info_rows
+                    }
+
+                    # ===== 3. 批量获取活动详情统计 =====
+                    activity_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            user_id,
+                            activity_name,
+                            SUM(activity_count) as total_count,
+                            SUM(accumulated_time) as total_time
+                        FROM user_activities 
+                        WHERE chat_id = $1 
+                          AND user_id = ANY($2::bigint[])
+                          AND activity_date >= $3 
+                          AND activity_date < $4
+                        GROUP BY user_id, activity_name
+                        """,
+                        chat_id,
+                        user_ids,
+                        month_start,
+                        month_end,
+                    )
+
+                    user_activities = {}
+                    for row in activity_rows:
+                        uid = row["user_id"]
+                        if uid not in user_activities:
+                            user_activities[uid] = {}
+                        user_activities[uid][row["activity_name"]] = {
+                            "count": row["total_count"] or 0,
+                            "time": row["total_time"] or 0,
+                        }
+
+                    # ===== 4. 批量获取综合罚款统计 =====
+                    fines_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            user_id,
+                            SUM(accumulated_time) as total_fines
                         FROM daily_statistics
                         WHERE chat_id = $1
-                          AND user_id = $2
+                          AND user_id = ANY($2::bigint[])
                           AND record_date >= $3
                           AND record_date < $4
                           AND activity_name IN ('total_fines', 'work_fines', 
                                                'work_start_fines', 'work_end_fines')
+                        GROUP BY user_id
                         """,
                         chat_id,
-                        user_id,
+                        user_ids,
                         month_start,
                         month_end,
                     )
-                    or 0
-                )
+                    user_fines = {
+                        row["user_id"]: row["total_fines"] or 0 for row in fines_rows
+                    }
 
-                overtime = await conn.fetchrow(
-                    """
-                    SELECT 
-                        SUM(CASE WHEN activity_name = 'overtime_count' 
-                            THEN activity_count ELSE 0 END) as overtime_count,
-                        SUM(CASE WHEN activity_name = 'overtime_time' 
-                            THEN accumulated_time ELSE 0 END) as overtime_time
-                    FROM daily_statistics
-                    WHERE chat_id = $1
-                      AND user_id = $2
-                      AND record_date >= $3
-                      AND record_date < $4
-                    """,
-                    chat_id,
-                    user_id,
-                    month_start,
-                    month_end,
-                )
+                    # ===== 5. 批量获取超时统计 =====
+                    overtime_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            user_id,
+                            SUM(CASE WHEN activity_name = 'overtime_count' 
+                                THEN activity_count ELSE 0 END) as overtime_count,
+                            SUM(CASE WHEN activity_name = 'overtime_time' 
+                                THEN accumulated_time ELSE 0 END) as overtime_time
+                        FROM daily_statistics
+                        WHERE chat_id = $1
+                          AND user_id = ANY($2::bigint[])
+                          AND record_date >= $3
+                          AND record_date < $4
+                        GROUP BY user_id
+                        """,
+                        chat_id,
+                        user_ids,
+                        month_start,
+                        month_end,
+                    )
+                    user_overtime = {
+                        row["user_id"]: {
+                            "count": row["overtime_count"] or 0,
+                            "time": row["overtime_time"] or 0,
+                        }
+                        for row in overtime_rows
+                    }
 
-                overtime_count = overtime["overtime_count"] if overtime else 0
-                total_overtime_time = overtime["overtime_time"] if overtime else 0
+                    # ===== 6. 批量获取白班工作统计 =====
+                    day_work_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            user_id,
+                            SUM(CASE WHEN activity_name = 'work_days' 
+                                THEN activity_count ELSE 0 END) as work_days,
+                            SUM(CASE WHEN activity_name = 'work_hours' 
+                                THEN accumulated_time ELSE 0 END) as work_hours
+                        FROM daily_statistics
+                        WHERE chat_id = $1
+                          AND user_id = ANY($2::bigint[])
+                          AND record_date >= $3
+                          AND record_date < $4
+                          AND shift = 'day'
+                        GROUP BY user_id
+                        """,
+                        chat_id,
+                        user_ids,
+                        month_start,
+                        month_end,
+                    )
+                    user_day_work = {
+                        row["user_id"]: {
+                            "days": row["work_days"] or 0,
+                            "hours": row["work_hours"] or 0,
+                        }
+                        for row in day_work_rows
+                    }
 
-                day_work = await conn.fetchrow(
-                    """
-                    SELECT 
-                        SUM(CASE WHEN activity_name = 'work_days' 
-                            THEN activity_count ELSE 0 END) as work_days,
-                        SUM(CASE WHEN activity_name = 'work_hours' 
-                            THEN accumulated_time ELSE 0 END) as work_hours
-                    FROM daily_statistics
-                    WHERE chat_id = $1
-                      AND user_id = $2
-                      AND record_date >= $3
-                      AND record_date < $4
-                      AND shift = 'day'
-                    """,
-                    chat_id,
-                    user_id,
-                    month_start,
-                    month_end,
-                )
+                    # ===== 7. 批量获取上下班记录计数与罚款 =====
+                    work_count_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            user_id,
+                            COUNT(CASE WHEN checkin_type = 'work_start' THEN 1 END) as work_start_count,
+                            COUNT(CASE WHEN checkin_type = 'work_end' THEN 1 END) as work_end_count,
+                            SUM(CASE WHEN checkin_type = 'work_start' THEN fine_amount ELSE 0 END) as work_start_fines,
+                            SUM(CASE WHEN checkin_type = 'work_end' THEN fine_amount ELSE 0 END) as work_end_fines
+                        FROM work_records
+                        WHERE chat_id = $1
+                          AND user_id = ANY($2::bigint[])
+                          AND record_date >= $3
+                          AND record_date < $4
+                        GROUP BY user_id
+                        """,
+                        chat_id,
+                        user_ids,
+                        month_start,
+                        month_end,
+                    )
+                    user_work_counts = {
+                        row["user_id"]: {
+                            "start_count": row["work_start_count"] or 0,
+                            "end_count": row["work_end_count"] or 0,
+                            "start_fines": row["work_start_fines"] or 0,
+                            "end_fines": row["work_end_fines"] or 0,
+                        }
+                        for row in work_count_rows
+                    }
 
-                work_days = day_work["work_days"] if day_work else 0
-                work_hours = day_work["work_hours"] if day_work else 0
+                    # ===== 8. 获取迟到早退统计 (如果此方法未优化，这里是潜在瓶颈) =====
+                    late_early_counts = {}
+                    for uid in user_ids:
+                        late_early_counts[uid] = await self.get_user_late_early_counts(
+                            chat_id, uid, year, month
+                        )
 
-                night_shifts = await conn.fetch(
-                    """
-                    SELECT 
-                        wr1.record_date as start_date,
-                        wr1.checkin_time as start_time,
-                        wr2.record_date as end_date,
-                        wr2.checkin_time as end_time
-                    FROM work_records wr1
-                    LEFT JOIN work_records wr2 ON 
-                        wr1.chat_id = wr2.chat_id 
-                        AND wr1.user_id = wr2.user_id
-                        AND wr1.shift = wr2.shift
-                        AND wr1.checkin_type = 'work_start'
-                        AND wr2.checkin_type = 'work_end'
-                    WHERE wr1.chat_id = $1
-                      AND wr1.user_id = $2
-                      AND wr1.shift = 'night'
-                      AND wr1.record_date >= $3
-                      AND wr1.record_date < $4
-                    """,
-                    chat_id,
-                    user_id,
-                    month_start,
-                    month_end,
-                )
+                    # ===== 9. 批量获取夜班统计（跨天处理逻辑） =====
+                    night_work_rows = await conn.fetch(
+                        """
+                        SELECT 
+                            wr1.user_id,
+                            wr1.record_date as start_date,
+                            wr1.checkin_time as start_time,
+                            wr2.record_date as end_date,
+                            wr2.checkin_time as end_time
+                        FROM work_records wr1
+                        LEFT JOIN work_records wr2 ON 
+                            wr1.chat_id = wr2.chat_id 
+                            AND wr1.user_id = wr2.user_id
+                            AND wr1.shift = wr2.shift
+                            AND wr1.record_date = wr2.record_date
+                            AND wr1.checkin_type = 'work_start'
+                            AND wr2.checkin_type = 'work_end'
+                        WHERE wr1.chat_id = $1
+                          AND wr1.user_id = ANY($2::bigint[])
+                          AND wr1.shift = 'night'
+                          AND wr1.record_date >= $3
+                          AND wr1.record_date < $4
+                          AND wr1.checkin_type = 'work_start'
+                        """,
+                        chat_id,
+                        user_ids,
+                        month_start,
+                        month_end,
+                    )
 
-                night_work_days = 0
-                night_work_hours = 0
+                    month_start_dt = beijing_tz.localize(
+                        datetime.combine(month_start, datetime.min.time())
+                    )
+                    month_end_dt = beijing_tz.localize(
+                        datetime.combine(month_end, datetime.min.time())
+                    )
 
-                month_start_dt = beijing_tz.localize(
-                    datetime.combine(month_start, datetime.min.time())
-                )
+                    user_night_work = {uid: {"days": 0, "hours": 0} for uid in user_ids}
 
-                month_end_dt = beijing_tz.localize(
-                    datetime.combine(month_end, datetime.min.time())
-                )
+                    for row in night_work_rows:
+                        uid = row["user_id"]
+                        if row["end_date"] and row["end_time"]:
+                            try:
+                                start_dt = datetime.combine(
+                                    row["start_date"],
+                                    datetime.strptime(
+                                        row["start_time"], "%H:%M"
+                                    ).time(),
+                                ).replace(tzinfo=beijing_tz)
+                                end_dt = datetime.combine(
+                                    row["end_date"],
+                                    datetime.strptime(row["end_time"], "%H:%M").time(),
+                                ).replace(tzinfo=beijing_tz)
 
-                for shift in night_shifts:
-                    if shift["end_date"] and shift["end_time"]:
-                        start_dt = datetime.combine(
-                            shift["start_date"],
-                            datetime.strptime(shift["start_time"], "%H:%M").time(),
-                        ).replace(tzinfo=beijing_tz)
-                        end_dt = datetime.combine(
-                            shift["end_date"],
-                            datetime.strptime(shift["end_time"], "%H:%M").time(),
-                        ).replace(tzinfo=beijing_tz)
+                                if end_dt < start_dt:
+                                    end_dt += timedelta(days=1)
 
-                        if end_dt < start_dt:
-                            end_dt += timedelta(days=1)
+                                # 截断到本月范围内
+                                work_start = max(start_dt, month_start_dt)
+                                work_end = min(end_dt, month_end_dt)
 
-                        work_start = max(start_dt, month_start_dt)
-                        work_end = min(end_dt, month_end_dt)
+                                if work_end > work_start:
+                                    night_seconds = int(
+                                        (work_end - work_start).total_seconds()
+                                    )
+                                    user_night_work[uid]["hours"] += night_seconds
+                                    user_night_work[uid]["days"] += 1
+                            except Exception as e:
+                                logger.error(f"处理夜班数据失败: {e}")
 
-                        if work_end > work_start:
-                            night_work_hours += int(
-                                (work_end - work_start).total_seconds()
-                            )
-                            night_work_days += 1
+                    # ===== 10. 组装最终结果 =====
+                    result = []
 
-                work_counts = await conn.fetchrow(
-                    """
-                    SELECT 
-                        COUNT(CASE WHEN checkin_type = 'work_start' THEN 1 END) as work_start_count,
-                        COUNT(CASE WHEN checkin_type = 'work_end' THEN 1 END) as work_end_count,
-                        SUM(CASE WHEN checkin_type = 'work_start' THEN fine_amount ELSE 0 END) as work_start_fines,
-                        SUM(CASE WHEN checkin_type = 'work_end' THEN fine_amount ELSE 0 END) as work_end_fines
-                    FROM work_records
-                    WHERE chat_id = $1
-                      AND user_id = $2
-                      AND record_date >= $3
-                      AND record_date < $4
-                    """,
-                    chat_id,
-                    user_id,
-                    month_start,
-                    month_end,
-                )
+                    def safe_int(value):
+                        return 0 if value is None else int(value)
 
-                late_early = await self.get_user_late_early_counts(
-                    chat_id, user_id, year, month
-                )
+                    for uid in user_ids:
+                        nickname = user_nicknames.get(uid, f"用户{uid}")
+                        user_acts = user_activities.get(uid, {})
 
-                # ========== 安全处理所有可能为 None 的值 ==========
-                def safe_int(value):
-                    """安全转换为整数，处理 None 值"""
-                    return 0 if value is None else int(value)
+                        total_act_count = sum(
+                            act.get("count", 0) for act in user_acts.values()
+                        )
+                        total_act_time = sum(
+                            act.get("time", 0) for act in user_acts.values()
+                        )
 
-                total_activity_count = safe_int(total_activity_count)
-                total_accumulated_time = safe_int(total_accumulated_time)
-                fines = safe_int(fines)
-                overtime_count = safe_int(overtime_count)
-                total_overtime_time = safe_int(total_overtime_time)
+                        overtime = user_overtime.get(uid, {"count": 0, "time": 0})
+                        day_work = user_day_work.get(uid, {"days": 0, "hours": 0})
+                        night_work = user_night_work.get(uid, {"days": 0, "hours": 0})
+                        work_counts = user_work_counts.get(
+                            uid,
+                            {
+                                "start_count": 0,
+                                "end_count": 0,
+                                "start_fines": 0,
+                                "end_fines": 0,
+                            },
+                        )
+                        late_early = late_early_counts.get(
+                            uid, {"late_count": 0, "early_count": 0}
+                        )
 
-                work_days = safe_int(work_days)
-                work_hours = safe_int(work_hours)
-                night_work_days = safe_int(night_work_days)
-                night_work_hours = safe_int(night_work_hours)
+                        user_data = {
+                            "user_id": uid,
+                            "nickname": nickname,
+                            "total_activity_count": safe_int(total_act_count),
+                            "total_accumulated_time": safe_int(total_act_time),
+                            "total_fines": safe_int(user_fines.get(uid, 0)),
+                            "overtime_count": safe_int(overtime["count"]),
+                            "total_overtime_time": safe_int(overtime["time"]),
+                            "work_days": safe_int(
+                                day_work["days"] + night_work["days"]
+                            ),
+                            "work_hours": safe_int(
+                                day_work["hours"] + night_work["hours"]
+                            ),
+                            "work_start_count": safe_int(work_counts["start_count"]),
+                            "work_end_count": safe_int(work_counts["end_count"]),
+                            "work_start_fines": safe_int(work_counts["start_fines"]),
+                            "work_end_fines": safe_int(work_counts["end_fines"]),
+                            "late_count": safe_int(late_early.get("late_count", 0)),
+                            "early_count": safe_int(late_early.get("early_count", 0)),
+                            "activities": user_acts,
+                        }
+                        result.append(user_data)
 
-                total_work_days = work_days + night_work_days
-                total_work_hours = work_hours + night_work_hours
+                    logger.info(f"✅ 月度统计完成: {len(result)} 个用户")
+                    return result
 
-                if work_counts:
-                    work_start_count = safe_int(work_counts["work_start_count"])
-                    work_end_count = safe_int(work_counts["work_end_count"])
-                    work_start_fines = safe_int(work_counts["work_start_fines"])
-                    work_end_fines = safe_int(work_counts["work_end_fines"])
-                else:
-                    work_start_count = 0
-                    work_end_count = 0
-                    work_start_fines = 0
-                    work_end_fines = 0
-
-                late_count = safe_int(late_early.get("late_count", 0))
-                early_count = safe_int(late_early.get("early_count", 0))
-
-                user_data = {
-                    "user_id": user_id,
-                    "nickname": nickname,
-                    "total_activity_count": total_activity_count,
-                    "total_accumulated_time": total_accumulated_time,
-                    "total_fines": fines,
-                    "overtime_count": overtime_count,
-                    "total_overtime_time": total_overtime_time,
-                    "work_days": total_work_days,
-                    "work_hours": total_work_hours,
-                    "work_start_count": work_start_count,
-                    "work_end_count": work_end_count,
-                    "work_start_fines": work_start_fines,
-                    "work_end_fines": work_end_fines,
-                    "late_count": late_count,
-                    "early_count": early_count,
-                    "activities": activities,
-                }
-
-                result.append(user_data)
-
-            logger.info(f"✅ 月度统计完成: {len(result)} 个用户")
-            return result
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 获取月度统计超时 (>{timeout}秒): {year}年{month}月")
+            return []
+        except Exception as e:
+            logger.error(f"❌ 获取月度统计失败: {e}", exc_info=True)
+            return []
 
     async def get_monthly_work_statistics(
         self, chat_id: int, year: int = None, month: int = None
