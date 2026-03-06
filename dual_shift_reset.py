@@ -12,6 +12,28 @@ from database import db
 logger = logging.getLogger("GroupCheckInBot.DualShiftReset")
 
 
+class Watchdog:
+    """看门狗定时器，防止操作超时"""
+
+    def __init__(self, timeout: int = 300, name: str = "watchdog"):
+        self.timeout = timeout
+        self.name = name
+        self.last_feed = time.time()
+        self.logger = logging.getLogger("GroupCheckInBot.Watchdog")
+
+    def feed(self):
+        """喂狗，重置计时器"""
+        self.last_feed = time.time()
+
+    async def run(self, coro):
+        """运行协程并监控超时"""
+        try:
+            return await asyncio.wait_for(coro, timeout=self.timeout)
+        except asyncio.TimeoutError:
+            self.logger.error(f"⏰ 看门狗超时: {self.name} (>{self.timeout}秒)")
+            raise
+
+
 # ========== 1. 调度入口 ==========
 async def handle_hard_reset(
     chat_id: int,
