@@ -122,19 +122,35 @@ class RobustBotManager:
                 await asyncio.sleep(delay)
 
     async def stop(self):
-        """停止Bot"""
+        """停止 Bot 并释放所有资源"""
         self._is_running = False
 
+        # 1. 取消正在运行的轮询任务
         if self._polling_task and not self._polling_task.done():
             self._polling_task.cancel()
             try:
+                # 等待任务完成取消动作，确保清理逻辑执行完毕
                 await self._polling_task
             except asyncio.CancelledError:
-                logger.info("Bot轮询任务已取消")
+                logger.info("Bot 轮询任务已取消")
 
+        # 2. 关闭 aiohttp 会话，释放底层网络连接
         if self.bot:
             await self.bot.session.close()
-            logger.info("Bot会话已关闭")
+            logger.info("Bot 会话已关闭")
+
+        # ===== 3. 释放进程锁：允许其他实例立即启动 =====
+        if hasattr(self, "lock_fd") and self.lock_fd:
+            try:
+                import fcntl
+
+                # 执行 LOCK_UN 操作解除锁定
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                self.lock_fd.close()
+                logger.info("✅ 进程锁已释放")
+            except Exception as e:
+                logger.error(f"❌ 释放锁失败: {e}")
+        # ===== 释放结束 =====
 
     async def send_message_with_retry(self, chat_id: int, text: str, **kwargs) -> bool:
         """带重试的消息发送"""
