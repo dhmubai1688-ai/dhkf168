@@ -8707,7 +8707,7 @@ async def on_shutdown():
 
 
 async def main():
-    """全环境通用"""
+    """全环境通用 - 修复端口检测问题"""
     is_render = "RENDER" in os.environ
     health_server_site = None
 
@@ -8719,10 +8719,16 @@ async def main():
     try:
         logger.info("🚀 启动打卡机器人系统...")
 
-        # 1. 首先初始化所有服务
+        # ==== 1. 最先启动健康检查服务器（确保Render能检测到端口）====
+        # 注意：不要 await 一个会永远运行的服务器启动函数，它应该启动后立即返回
+        health_server_site = await start_health_server()
+        logger.info("✅ 健康检查服务器已启动，端口已打开")
+
+        # ==== 2. 然后初始化所有服务（这些可能会耗时）====
+        # 在这里，健康检查服务器已经在后台运行了，所以Render不会超时
         await initialize_services()
 
-        # 2. 确认数据库已经完全初始化
+        # ==== 3. 确认数据库已经完全初始化 ====
         max_wait = 30
         waited = 0
         while waited < max_wait:
@@ -8742,12 +8748,13 @@ async def main():
 
         if waited >= max_wait:
             logger.error("❌ 数据库初始化超时，退出启动")
+            # 注意：这里不能直接return，因为健康检查服务器已经在运行
+            # 需要先停止健康检查服务器再退出
+            if health_server_site:
+                await health_server_site.stop()
             return
 
-        # 3. 启动健康检查服务器
-        health_server_site = await start_health_server()
-
-        # 4. 启动定时任务（此时数据库已就绪）
+        # ==== 4. 启动定时任务（此时数据库已就绪）====
         background_tasks = [
             asyncio.create_task(daily_reset_task(), name="daily_reset"),
             asyncio.create_task(memory_cleanup_task(), name="memory_cleanup"),
@@ -8760,17 +8767,17 @@ async def main():
                 asyncio.create_task(keepalive_loop(), name="render_keepalive")
             )
 
-        # 5. 执行启动通知
+        # ==== 5. 执行启动通知 ====
         await on_startup()
 
-        # 6. 启动轮询
+        # ==== 6. 启动轮询 ====
         polling_task = asyncio.create_task(
             bot_manager.start_polling_with_retry(), name="telegram_polling"
         )
 
         logger.info("🤖 机器人系统全功能已就绪")
 
-        # 7. 等待直到被取消
+        # ==== 7. 等待直到被取消 ====
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
