@@ -18,11 +18,6 @@ class RobustBotManager:
     """健壮的Bot管理器 - 带自动重连"""
 
     def __init__(self, token: str):
-        # ===== 添加：多实例防护 =====
-        import os
-        import sys
-        import fcntl
-        import time
 
         # 1. Render 环境实例检查：防止云平台蓝绿部署时产生两个活跃实例
         if os.environ.get("RENDER"):
@@ -71,6 +66,15 @@ class RobustBotManager:
         self._last_successful_connection = 0
         self._connection_check_interval = 300
 
+    def __del__(self):
+        """析构时释放锁（安全网）"""
+        if hasattr(self, "lock_fd") and self.lock_fd:
+            try:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                self.lock_fd.close()
+            except:
+                pass
+
     async def initialize(self):
         """初始化Bot"""
         self.bot = Bot(token=self.token)
@@ -78,7 +82,30 @@ class RobustBotManager:
         logger.info("Bot管理器初始化完成")
 
     async def start_polling_with_retry(self):
-        """带重试的轮询启动"""
+        """带重试的轮询启动（增强锁监控与多实例检测版）"""
+
+        # ===== 1. 启动前置检查：验证进程锁是否依然有效 =====
+        if hasattr(self, "lock_fd") and self.lock_fd:
+            try:
+                # 通过同步文件描述符状态检查文件是否仍处于有效打开状态
+                os.fsync(self.lock_fd.fileno())
+                logger.debug("✅ 进程锁状态正常")
+            except Exception as e:
+                logger.error(f"❌ 进程锁已失效: {e}，退出以防止多开")
+                # 尝试安全释放旧资源
+                try:
+                    import fcntl
+
+                    fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                    self.lock_fd.close()
+                except:
+                    pass
+                sys.exit(1)
+        else:
+            logger.error("❌ 进程锁不存在，拒绝启动")
+            sys.exit(1)
+        # ===== 检查结束 =====
+
         self._is_running = True
         self._current_retry = 0
 
@@ -86,12 +113,22 @@ class RobustBotManager:
             try:
                 self._current_retry += 1
                 logger.info(
-                    f"🤖 启动Bot轮询 (尝试 {self._current_retry}/{self._max_retries})"
+                    f"🤖 启动 Bot 轮询 (尝试 {self._current_retry}/{self._max_retries})"
                 )
 
-                await self.bot.delete_webhook(drop_pending_updates=True)
-                logger.info("✅ Webhook已删除，使用轮询模式")
+                # 2. 轮询循环前的“最后一公里”锁状态确认
+                if hasattr(self, "lock_fd") and self.lock_fd:
+                    try:
+                        os.fsync(self.lock_fd.fileno())
+                    except Exception as e:
+                        logger.error(f"❌ 轮询前检测到锁失效: {e}，退出")
+                        sys.exit(1)
 
+                # 3. 清理环境：删除可能存在的 Webhook，防止轮询冲突
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                logger.info("✅ Webhook 已删除，切换至长轮询模式")
+
+                # 4. 进入 aiogram/框架轮询逻辑
                 await self.dispatcher.start_polling(
                     self.bot,
                     skip_updates=True,
@@ -99,26 +136,42 @@ class RobustBotManager:
                 )
 
                 self._last_successful_connection = time.time()
-                logger.info("Bot轮询正常结束")
+                logger.info("Bot 轮询正常结束")
                 break
 
             except asyncio.CancelledError:
-                logger.info("Bot轮询被取消")
+                # 外部调用 stop() 时抛出，属于预期内的停止
+                logger.info("Bot 轮询由于任务取消而停止")
                 break
 
             except Exception as e:
-                logger.error(f"❌ Bot轮询失败 (尝试 {self._current_retry}): {e}")
+                logger.error(f"❌ Bot 轮询异常 (尝试 {self._current_retry}): {e}")
 
+                # 5. 核心冲突检测：如果发现 409 错误，说明有另一个实例持有了 Telegram Token
+                error_str = str(e).lower()
+                if (
+                    "conflict" in error_str
+                    or "terminated by other getupdates" in error_str
+                ):
+                    logger.critical(
+                        "🚨 [CRITICAL] 检测到外部多实例冲突！为保护账号，本进程立即退出"
+                    )
+                    sys.exit(1)
+
+                # 6. 重试策略：指数退避
                 if self._current_retry >= self._max_retries:
                     logger.critical(
-                        f"🚨 Bot启动重试{self._max_retries}次后失败，停止尝试"
+                        f"🚨 Bot 启动重试 {self._max_retries} 次后全部失败，放弃连接"
                     )
                     break
 
+                # 计算退避时间：2, 4, 8, 16... 最大 300秒
                 delay = self._base_delay * (2 ** (self._current_retry - 1))
                 delay = min(delay, 300)
 
-                logger.info(f"⏳ {delay:.1f}秒后第{self._current_retry + 1}次重试...")
+                logger.info(
+                    f"⏳ {delay:.1f} 秒后开始第 {self._current_retry + 1} 次重试..."
+                )
                 await asyncio.sleep(delay)
 
     async def stop(self):
