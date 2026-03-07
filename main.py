@@ -7842,6 +7842,29 @@ async def daily_reset_task():
     """每日重置监控任务 - 纯双班模式"""
     logger.info("🚀 每日重置监控任务已启动")
 
+    # 等待数据库完全初始化
+    max_wait = 30
+    waited = 0
+    while waited < max_wait:
+        if db._initialized and db.pool:
+            try:
+                # 测试数据库连接
+                async with db.pool.acquire() as test_conn:
+                    await test_conn.fetchval("SELECT 1")
+                logger.info(f"✅ 数据库已就绪，重置任务开始工作 (等待 {waited}s)")
+                break
+            except Exception as e:
+                logger.warning(f"数据库连接测试失败: {e}")
+
+        logger.debug(f"⏳ 等待数据库初始化... ({waited}s)")
+        await asyncio.sleep(1)
+        waited += 1
+
+    if waited >= max_wait:
+        logger.error("❌ 数据库初始化超时，重置任务退出")
+        return
+
+    # 创建重置日志表（如果不存在）
     try:
         async with db.pool.acquire() as conn:
             await conn.execute(
@@ -7956,8 +7979,32 @@ async def daily_reset_task():
             loop_start = time.time()
             loop_count += 1
 
+            # 每次循环开始前检查数据库健康状态
+            if not db._initialized or not db.pool:
+                logger.error("❌ 数据库连接已断开，重置任务暂停")
+                await asyncio.sleep(60)
+                continue
+
+            # 定期测试数据库连接
+            if loop_count % 10 == 0:  # 每10次循环测试一次连接
+                try:
+                    async with db.pool.acquire() as test_conn:
+                        await test_conn.fetchval("SELECT 1")
+                except Exception as e:
+                    logger.error(f"❌ 数据库连接测试失败: {e}")
+                    logger.error("重置任务将暂停，等待数据库恢复...")
+                    await asyncio.sleep(60)
+                    continue
+
             now = db.get_beijing_time()
-            all_groups = await db.get_all_groups()
+
+            # 获取所有群组ID
+            try:
+                all_groups = await db.get_all_groups()
+            except Exception as e:
+                logger.error(f"❌ 获取群组列表失败: {e}")
+                await asyncio.sleep(60)
+                continue
 
             if now.minute in [0, 30]:
                 logger.debug(
@@ -7974,6 +8021,8 @@ async def daily_reset_task():
         except Exception as e:
             logger.error(f"❌ 重置任务主循环出错: {e}")
             logger.error(traceback.format_exc())
+            # 出错后等待较长时间再重试
+            await asyncio.sleep(60)
 
         await asyncio.sleep(30)
 
@@ -8171,12 +8220,36 @@ async def initialize_services():
     logger.info("🔄 初始化服务...")
 
     try:
+        # ===== 1. 数据库初始化 =====
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
-
+        
+        # 确保数据库完全就绪
+        max_wait = 30
+        waited = 0
+        while waited < max_wait:
+            if db._initialized and db.pool:
+                try:
+                    # 测试数据库连接
+                    async with db.pool.acquire() as test_conn:
+                        await test_conn.fetchval("SELECT 1")
+                    logger.info(f"✅ 数据库连接测试通过 (等待 {waited}s)")
+                    break
+                except Exception as e:
+                    logger.warning(f"数据库连接测试失败: {e}")
+            
+            logger.debug(f"⏳ 等待数据库完全初始化... ({waited}s)")
+            await asyncio.sleep(1)
+            waited += 1
+        
+        if waited >= max_wait:
+            raise RuntimeError("数据库初始化超时")
+        
+        # ===== 2. 启动数据库维护任务 =====
         await db.start_connection_maintenance()
         logger.info("✅ 数据库维护任务已启动")
 
+        # ===== 3. Bot管理器初始化 =====
         await bot_manager.initialize()
         logger.info("✅ Bot管理器初始化完成")
 
@@ -8184,6 +8257,7 @@ async def initialize_services():
         bot = bot_manager.bot
         dp = bot_manager.dispatcher
 
+        # ===== 4. 通知服务初始化 =====
         from utils import notification_service as utils_notification_service
         from utils import init_notification_service
         from utils import user_lock_manager  # ✅ 确保导入 user_lock_manager
@@ -8203,51 +8277,65 @@ async def initialize_services():
                 f"✅ 通知服务配置完成: bot_manager={notification_service.bot_manager is not None}, bot={notification_service.bot is not None}"
             )
 
+        # ===== 5. 定时器管理器配置 =====
         timer_manager.set_activity_timer_callback(activity_timer)
         logger.info("✅ 定时器管理器配置完成")
 
+        # ===== 6. 心跳管理器初始化 =====
         await heartbeat_manager.initialize()
         logger.info("✅ 心跳管理器初始化完成")
 
+        # ===== 7. Bot健康监控启动 =====
         await bot_manager.start_health_monitor()
         logger.info("✅ Bot健康监控已启动")
 
+        # ===== 8. 日志中间件注册 =====
         dp.message.middleware(LoggingMiddleware())
         logger.info("✅ 日志中间件已注册")
 
+        # ===== 9. 消息处理器注册 =====
         await register_handlers()
         logger.info("✅ 消息处理器注册完成")
 
+        # ===== 10. 班次状态管理器启动 =====
         from utils import shift_state_manager
 
         await shift_state_manager.start()
         logger.info("✅ 班次状态管理器已启动")
 
-        # ✅ 在这里添加 user_lock_manager 的启动
+        # ===== 11. 用户锁管理器启动 =====
         await user_lock_manager.start()
         logger.info("✅ 用户锁管理器清理任务已启动")
 
+        # ===== 12. 过期活动恢复 =====
         recovered_count = await recover_expired_activities()
         logger.info(f"✅ 过期活动恢复完成: {recovered_count} 个活动已处理")
 
+        # ===== 13. 班次状态恢复 =====
         from dual_shift_reset import recover_shift_states
 
         shift_recovered = await recover_shift_states()
         logger.info(f"✅ 班次状态恢复完成: {shift_recovered} 个群组")
 
+        # ===== 14. 检查未完成的重置 =====
         from dual_shift_reset import check_missed_resets_on_startup
 
         asyncio.create_task(check_missed_resets_on_startup())
+        logger.info("✅ 未完成重置检查任务已创建")
 
+        # ===== 15. 服务健康检查 =====
         health_status = await check_services_health()
         if all(health_status.values()):
             logger.info("🎉 所有服务初始化完成且健康")
         else:
-            logger.warning(f"⚠️ 服务初始化完成但有警告: {health_status}")
+            warning_services = [k for k, v in health_status.items() if not v and k != "timestamp"]
+            logger.warning(f"⚠️ 服务初始化完成但有警告: {warning_services}")
 
+        # ===== 16. 月度维护任务启动 =====
         asyncio.create_task(monthly_maintenance_task(), name="monthly_maintenance")
         logger.info("✅ 月度维护任务已启动")
 
+        # ===== 17. 记录配置信息 =====
         from config import Config
 
         logger.info(
@@ -8267,6 +8355,8 @@ async def initialize_services():
         logger.error(
             f"调试信息 - notification_service.bot: {getattr(notification_service, 'bot', '未设置')}"
         )
+        import traceback
+        logger.error(traceback.format_exc())
         raise
 
 
@@ -8556,10 +8646,35 @@ async def main():
     try:
         logger.info("🚀 启动打卡机器人系统...")
 
+        # 1. 首先初始化所有服务
         await initialize_services()
 
+        # 2. 确认数据库已经完全初始化
+        max_wait = 30
+        waited = 0
+        while waited < max_wait:
+            if db._initialized and db.pool:
+                # 额外测试一下数据库连接
+                try:
+                    test_result = await db.connection_health_check()
+                    if test_result:
+                        logger.info(f"✅ 数据库已完全就绪 (等待 {waited}s)")
+                        break
+                except Exception as e:
+                    logger.warning(f"数据库连接测试失败: {e}")
+
+            logger.debug(f"⏳ 等待数据库完全初始化... ({waited}s)")
+            await asyncio.sleep(1)
+            waited += 1
+
+        if waited >= max_wait:
+            logger.error("❌ 数据库初始化超时，退出启动")
+            return
+
+        # 3. 启动健康检查服务器
         health_server_site = await start_health_server()
 
+        # 4. 启动定时任务（此时数据库已就绪）
         background_tasks = [
             asyncio.create_task(daily_reset_task(), name="daily_reset"),
             asyncio.create_task(memory_cleanup_task(), name="memory_cleanup"),
@@ -8572,14 +8687,17 @@ async def main():
                 asyncio.create_task(keepalive_loop(), name="render_keepalive")
             )
 
+        # 5. 执行启动通知
         await on_startup()
 
+        # 6. 启动轮询
         polling_task = asyncio.create_task(
             bot_manager.start_polling_with_retry(), name="telegram_polling"
         )
 
         logger.info("🤖 机器人系统全功能已就绪")
 
+        # 7. 等待直到被取消
         await asyncio.Event().wait()
 
     except asyncio.CancelledError:
