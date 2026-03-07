@@ -8223,7 +8223,7 @@ async def initialize_services():
         # ===== 1. 数据库初始化 =====
         await db.initialize()
         logger.info("✅ 数据库初始化完成")
-        
+
         # 确保数据库完全就绪
         max_wait = 30
         waited = 0
@@ -8237,14 +8237,14 @@ async def initialize_services():
                     break
                 except Exception as e:
                     logger.warning(f"数据库连接测试失败: {e}")
-            
+
             logger.debug(f"⏳ 等待数据库完全初始化... ({waited}s)")
             await asyncio.sleep(1)
             waited += 1
-        
+
         if waited >= max_wait:
             raise RuntimeError("数据库初始化超时")
-        
+
         # ===== 2. 启动数据库维护任务 =====
         await db.start_connection_maintenance()
         logger.info("✅ 数据库维护任务已启动")
@@ -8328,7 +8328,9 @@ async def initialize_services():
         if all(health_status.values()):
             logger.info("🎉 所有服务初始化完成且健康")
         else:
-            warning_services = [k for k, v in health_status.items() if not v and k != "timestamp"]
+            warning_services = [
+                k for k, v in health_status.items() if not v and k != "timestamp"
+            ]
             logger.warning(f"⚠️ 服务初始化完成但有警告: {warning_services}")
 
         # ===== 16. 月度维护任务启动 =====
@@ -8356,6 +8358,7 @@ async def initialize_services():
             f"调试信息 - notification_service.bot: {getattr(notification_service, 'bot', '未设置')}"
         )
         import traceback
+
         logger.error(traceback.format_exc())
         raise
 
@@ -8493,7 +8496,8 @@ async def register_handlers():
 
 
 async def keepalive_loop():
-    """完整的保活循环"""
+    """生产级保活循环（防休眠 + DB自愈 + 死锁检测 + 内存维护）"""
+
     external_url = os.environ.get("RENDER_EXTERNAL_URL") or getattr(
         Config, "WEBHOOK_URL", None
     )
@@ -8501,16 +8505,24 @@ async def keepalive_loop():
         external_url = external_url.rstrip("/")
 
     port = int(os.environ.get("PORT", 10000))
+
     logger.info(f"🚀 保活循环启动 | 外部URL: {external_url or '未设置'} | 端口: {port}")
+
+    db_fail_count = 0
+    MAX_DB_FAIL = 3
 
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=20),
         headers={"User-Agent": "Bot-KeepAlive-Service"},
     ) as session:
+
         while True:
             try:
-                await asyncio.sleep(300)
+                await asyncio.sleep(300)  # 5分钟
 
+                # =========================
+                # 1 外部URL保活(Render)
+                # =========================
                 if external_url:
                     try:
                         async with session.get(f"{external_url}/health") as resp:
@@ -8523,35 +8535,96 @@ async def keepalive_loop():
                     except Exception as e:
                         logger.warning(f"🌍 外部保活失败: {e}")
 
+                # =========================
+                # 2 本地健康检查
+                # =========================
                 try:
                     async with session.get(f"http://127.0.0.1:{port}/health") as resp:
                         if resp.status != 200:
                             logger.warning(
                                 f"🏠 内部健康检查异常 | 状态码: {resp.status}"
                             )
+                        else:
+                            logger.debug("🏠 内部健康检查成功")
                 except Exception as e:
                     logger.warning(f"🏠 内部健康检查失败: {e}")
 
-                try:
-                    if hasattr(db, "connection_health_check"):
-                        await db.connection_health_check()
-                except Exception as e:
-                    logger.warning(f"🗄️ 数据库保活异常: {e}")
+                # =========================
+                # 3 数据库连接池检测
+                # =========================
+                if hasattr(db, "pool") and db.pool:
 
+                    try:
+                        async with db.pool.acquire() as conn:
+                            await conn.fetchval("SELECT 1")
+
+                        db_fail_count = 0
+                        logger.debug("🗄️ 数据库连接池正常")
+
+                    except Exception as e:
+
+                        db_fail_count += 1
+                        logger.error(
+                            f"🗄️ 数据库连接异常 ({db_fail_count}/{MAX_DB_FAIL}) : {e}"
+                        )
+
+                        # 连续失败才重建连接池
+                        if db_fail_count >= MAX_DB_FAIL:
+                            try:
+                                logger.warning("♻️ 尝试重建数据库连接池...")
+
+                                await db.close()
+                                await db.initialize()
+
+                                db_fail_count = 0
+
+                                logger.info("✅ 数据库连接池重建成功")
+
+                            except Exception as rebuild_error:
+                                logger.error(
+                                    f"❌ 数据库连接池重建失败: {rebuild_error}"
+                                )
+
+                # =========================
+                # 4 用户锁死锁检测
+                # =========================
+                if hasattr(user_lock_manager, "_locks"):
+
+                    now = time.time()
+                    long_locks = []
+
+                    for key, lock in user_lock_manager._locks.items():
+                        if lock.locked():
+
+                            last_access = user_lock_manager._access_times.get(key, 0)
+
+                            if now - last_access > 300:
+                                long_locks.append(key)
+
+                    if long_locks:
+                        logger.warning(
+                            f"⚠️ 检测到长时间锁 ({len(long_locks)}) : {long_locks[:5]}"
+                        )
+
+                # =========================
+                # 5 垃圾回收
+                # =========================
                 try:
                     collected = gc.collect()
                     if collected > 0:
-                        logger.debug(f"🧹 GC 回收对象数: {collected}")
+                        logger.debug(f"🧹 GC回收对象: {collected}")
                 except Exception:
                     pass
 
             except asyncio.CancelledError:
                 logger.info("🛑 保活循环已取消")
                 break
-            except Exception as e:
-                logger.error(f"⚠️ 保活循环遇到异常: {e}")
-                await asyncio.sleep(60)
 
+            except Exception as e:
+                logger.error(f"⚠️ 保活循环异常: {e}")
+
+                # 防止异常循环
+                await asyncio.sleep(60)
 
 async def on_startup():
     """启动时执行"""
