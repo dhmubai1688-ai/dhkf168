@@ -3243,7 +3243,7 @@ class PostgreSQLDatabase:
                         chat_id,
                     )
 
-                    # 任务 B：执行复杂的统计聚合查询（连接2）
+                    # ===== 修改任务 B：添加所有工作相关字段 =====
                     stats_task = conn2.fetch(
                         """
                         WITH agg AS (
@@ -3262,30 +3262,61 @@ class PostgreSQLDatabase:
                             a.user_id,
                             a.shift,
                             MAX(u.nickname) AS nickname,
+                            
+                            -- 活动相关统计
                             SUM(CASE WHEN activity_name NOT IN (
                                 'work_days','work_hours',
                                 'work_fines','work_start_fines','work_end_fines',
-                                'overtime_count','overtime_time','total_fines'
+                                'overtime_count','overtime_time','total_fines',
+                                'work_start_count','work_end_count','late_count','early_count'
                             ) THEN activity_count ELSE 0 END) AS total_activity_count,
+                            
                             SUM(CASE WHEN activity_name NOT IN (
                                 'work_days','work_hours',
                                 'work_fines','work_start_fines','work_end_fines',
-                                'overtime_count','overtime_time','total_fines'
+                                'overtime_count','overtime_time','total_fines',
+                                'work_start_count','work_end_count','late_count','early_count'
                             ) THEN accumulated_time ELSE 0 END) AS total_accumulated_time,
+                            
+                            -- 罚款统计
                             SUM(CASE WHEN activity_name IN (
                                 'total_fines',
                                 'work_fines',
                                 'work_start_fines',
                                 'work_end_fines'
                             ) THEN accumulated_time ELSE 0 END) AS total_fines,
+                            
+                            -- 超时统计
                             SUM(CASE WHEN activity_name='overtime_count'
                                 THEN activity_count ELSE 0 END) AS overtime_count,
                             SUM(CASE WHEN activity_name='overtime_time'
                                 THEN accumulated_time ELSE 0 END) AS total_overtime_time,
+                            
+                            -- ✅ 工作相关统计
                             SUM(CASE WHEN activity_name='work_days'
                                 THEN activity_count ELSE 0 END) AS work_days,
                             SUM(CASE WHEN activity_name='work_hours'
                                 THEN accumulated_time ELSE 0 END) AS work_hours,
+                                
+                            -- ✅ 上下班计数
+                            SUM(CASE WHEN activity_name='work_start_count'
+                                THEN activity_count ELSE 0 END) AS work_start_count,
+                            SUM(CASE WHEN activity_name='work_end_count'
+                                THEN activity_count ELSE 0 END) AS work_end_count,
+                                
+                            -- ✅ 上下班罚款
+                            SUM(CASE WHEN activity_name='work_start_fines'
+                                THEN accumulated_time ELSE 0 END) AS work_start_fines,
+                            SUM(CASE WHEN activity_name='work_end_fines'
+                                THEN accumulated_time ELSE 0 END) AS work_end_fines,
+                                
+                            -- ✅ 迟到早退
+                            SUM(CASE WHEN activity_name='late_count'
+                                THEN activity_count ELSE 0 END) AS late_count,
+                            SUM(CASE WHEN activity_name='early_count'
+                                THEN activity_count ELSE 0 END) AS early_count,
+                            
+                            -- 活动详情
                             jsonb_object_agg(
                                 activity_name,
                                 jsonb_build_object(
@@ -3296,7 +3327,8 @@ class PostgreSQLDatabase:
                                 WHERE activity_name NOT IN (
                                     'work_days','work_hours',
                                     'work_fines','work_start_fines','work_end_fines',
-                                    'overtime_count','overtime_time','total_fines'
+                                    'overtime_count','overtime_time','total_fines',
+                                    'work_start_count','work_end_count','late_count','early_count'
                                 )
                             ) AS activities
                         FROM agg a
@@ -3343,7 +3375,7 @@ class PostgreSQLDatabase:
                             data["activities"] = {}
                         result.append(data)
                 else:
-                    # 如果用户没记录，按班次模式补全 0 数据
+                    # 如果用户没记录，按班次模式补全 0 数据，包含所有字段
                     shifts = ["day", "night"] if has_dual_mode else ["day"]
                     for shift in shifts:
                         result.append(
@@ -3358,6 +3390,12 @@ class PostgreSQLDatabase:
                                 "total_overtime_time": 0,
                                 "work_days": 0,
                                 "work_hours": 0,
+                                "work_start_count": 0,
+                                "work_end_count": 0,
+                                "work_start_fines": 0,
+                                "work_end_fines": 0,
+                                "late_count": 0,
+                                "early_count": 0,
                                 "activities": {},
                             }
                         )
