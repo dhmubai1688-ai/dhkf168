@@ -8,8 +8,33 @@ from performance import global_cache
 
 from database import db
 
+# ========== 新增导入 ==========
+from retry_decorator import (
+    with_handover_retry,
+    with_execution_phase,
+    RetryableError,
+    NonRetryableError,
+)
+
+# ========== 新增结束 ==========
 
 logger = logging.getLogger("GroupCheckInBot.DualShiftReset")
+
+
+# ========== 新增：换班专用异常类 ==========
+class HandoverRetryableError(RetryableError):
+    """换班可重试异常 - 遇到这类错误会自动重试"""
+
+    pass
+
+
+class HandoverNonRetryableError(NonRetryableError):
+    """换班不可重试异常 - 遇到这类错误直接抛出，不会重试"""
+
+    pass
+
+
+# ========== 新增结束 ==========
 
 
 class Watchdog:
@@ -34,14 +59,79 @@ class Watchdog:
             raise
 
 
+# ========== 新增：重试回调函数 ==========
+async def _on_handover_retry(context: dict, retry_num: int, delay: float):
+    """重试前的回调函数"""
+    chat_id = context.get("chat_id", "?")
+    target_date = context.get("target_date", "?")
+    logger.warning(
+        f"🔄 [{chat_id}] 换班执行重试 {retry_num} 次，等待 {delay:.1f}秒 "
+        f"(目标日期: {target_date})"
+    )
+
+
+async def _on_handover_failure(context: dict, exception: Exception, retry_count: int):
+    """最终失败后的回调函数"""
+    chat_id = context.get("chat_id", "?")
+    target_date = context.get("target_date", "?")
+    logger.error(
+        f"❌ [{chat_id}] 换班执行最终失败\n"
+        f"   ├─ 目标日期: {target_date}\n"
+        f"   ├─ 重试次数: {retry_count}\n"
+        f"   └─ 错误类型: {type(exception).__name__}\n"
+        f"   └─ 错误信息: {exception}"
+    )
+
+    # 发送通知给管理员（可选，保留现有通知机制）
+    try:
+        from utils import notification_service
+
+        await notification_service.send_notification(
+            chat_id=None,  # 发送给所有管理员
+            text=(
+                f"⚠️ <b>换班执行失败</b>\n\n"
+                f"群组: <code>{chat_id}</code>\n"
+                f"目标日期: <code>{target_date}</code>\n"
+                f"重试次数: <code>{retry_count}</code>\n"
+                f"错误: <code>{str(exception)[:200]}</code>"
+            ),
+            notification_type="admin",
+        )
+    except Exception as e:
+        logger.error(f"发送失败通知出错: {e}")
+
+
+# ========== 新增结束 ==========
+
+
 # ========== 1. 调度入口 ==========
+# ===== 修改：为主入口函数添加重试装饰器 =====
+@with_handover_retry(
+    max_retries=3,
+    base_delay=10,
+    max_delay=300,
+    retryable_exceptions=(
+        ConnectionError,
+        TimeoutError,
+        asyncio.TimeoutError,
+        HandoverRetryableError,
+    ),
+    non_retryable_exceptions=(
+        ValueError,
+        TypeError,
+        HandoverNonRetryableError,
+    ),
+    on_retry=_on_handover_retry,
+    on_failure=_on_handover_failure,
+)
+# ===== 修改结束 =====
 async def handle_hard_reset(
     chat_id: int,
     operator_id: Optional[int] = None,
     target_date: Optional[date] = None,
 ) -> bool:
     """
-    硬重置总调度入口 - 纯双班模式
+    硬重置总调度入口 - 纯双班模式（带重试保护）
     """
     try:
         logger.info(f"🔄 [双班模式] 群组 {chat_id} 执行双班硬重置")
@@ -65,14 +155,22 @@ async def handle_hard_reset(
 
 
 # ========== 2. 双班硬重置核心流程 ==========
+# ========== 2. 双班硬重置核心流程 ==========
 async def _dual_shift_hard_reset(
     chat_id: int,
     operator_id: Optional[int] = None,
     forced_target_date: Optional[date] = None,
 ) -> bool:
-    """双班硬重置主流程（带幂等性）"""
+    """双班硬重置主流程（带看门狗+重试协同保护）"""
+
+    # ===== 1. 创建看门狗，保护整个流程 =====
+    watchdog = Watchdog(timeout=300, name=f"dual_reset_{chat_id}")
+    # ===== 结束 =====
+
     try:
         now = db.get_beijing_time()
+        # 喂狗：开始处理
+        watchdog.feed()
 
         date_range = await db.get_business_date_range(chat_id, now)
         business_today = date_range["business_today"]
@@ -149,6 +247,9 @@ async def _dual_shift_hard_reset(
                 logger.debug(f"⏳ 不在执行窗口内")
                 return False
 
+        # 喂狗：日期计算完成
+        watchdog.feed()
+
         reset_flag_key = f"dual_reset:{chat_id}:{target_date.strftime('%Y%m%d')}"
         if await global_cache.get(reset_flag_key):
             logger.info(f"⏭️ 群组 {chat_id} 今天已完成双班重置，跳过")
@@ -196,6 +297,8 @@ async def _dual_shift_hard_reset(
         }
 
         logger.info(f"📊 [步骤1-2/5] 并发处理未完成活动及补全下班记录...")
+
+        # ===== 2. 使用看门狗保护并发任务 =====
         task1 = asyncio.create_task(
             _force_end_all_unfinished_shifts(chat_id, now, target_date, business_today)
         )
@@ -203,7 +306,13 @@ async def _dual_shift_hard_reset(
             _complete_missing_work_ends(chat_id, target_date, business_today)
         )
 
-        results = await asyncio.gather(task1, task2, return_exceptions=True)
+        # 使用看门狗保护 gather 操作，防止卡死
+        results = await watchdog.run(
+            asyncio.gather(task1, task2, return_exceptions=True)
+        )
+        # 喂狗：步骤1-2完成
+        watchdog.feed()
+        # ===== 结束 =====
 
         if not isinstance(results[0], Exception):
             force_stats = results[0]
@@ -225,46 +334,56 @@ async def _dual_shift_hard_reset(
 
         logger.info(f"📊 [步骤3/5] 导出目标日期数据...")
         export_start = time.time()
+
+        # ===== 3. 使用看门狗保护导出操作 =====
         try:
-            export_success = await _export_yesterday_data_concurrent(
-                chat_id, target_date
+            # 导出函数本身已经有重试机制，这里再加看门狗防止卡死
+            export_success = await watchdog.run(
+                _export_yesterday_data_concurrent(chat_id, target_date)
             )
-        except Exception as e:
-            logger.error(f"❌ [数据导出] 失败: {e}")
-            logger.error(traceback.format_exc())
-            export_success = False
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ [数据导出] 超时，将标记为重试")
+            # 超时后包装为可重试异常，让外层重试机制处理
+            raise HandoverRetryableError(f"导出操作超时: {chat_id}")
+        # 喂狗：导出完成
+        watchdog.feed()
+        # ===== 结束 =====
+
         export_time = time.time() - export_start
 
         logger.info(f"📊 [步骤4/5] 清除目标日期数据...")
         cleanup_start = time.time()
+
+        # ===== 4. 使用看门狗保护清理操作 =====
         try:
-            cleanup_stats = await _cleanup_old_data(
-                chat_id, target_date, business_today
+            cleanup_stats = await watchdog.run(
+                _cleanup_old_data(chat_id, target_date, business_today)
             )
-        except Exception as e:
-            logger.error(f"❌ [数据清理] 失败: {e}")
-            logger.error(traceback.format_exc())
-            cleanup_stats = {
-                "user_activities": 0,
-                "work_records": 0,
-                "daily_statistics": 0,
-                "users_reset": 0,
-            }
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ [数据清理] 超时，将标记为重试")
+            raise HandoverRetryableError(f"清理操作超时: {chat_id}")
+        # 喂狗：清理完成
+        watchdog.feed()
+        # ===== 结束 =====
+
         cleanup_time = time.time() - cleanup_start
 
+        # ===== 5. 使用看门狗保护班次状态清理 =====
         deleted_count = 0
         try:
             if not db.pool or not db._initialized:
                 logger.error("数据库连接池未初始化")
                 return
             async with db.pool.acquire() as conn:
-                result = await conn.execute(
-                    """
+                result = await watchdog.run(
+                    conn.execute(
+                        """
                     DELETE FROM group_shift_state 
                     WHERE chat_id = $1 AND record_date < $2
                     """,
-                    chat_id,
-                    business_today,
+                        chat_id,
+                        business_today,
+                    )
                 )
                 deleted_count = _parse_delete_count(result)
 
@@ -282,8 +401,14 @@ async def _dual_shift_hard_reset(
                 else:
                     logger.info("✅ 没有需要清除的班次状态")
 
+        except asyncio.TimeoutError:
+            logger.error(f"⏰ [清除班次状态] 超时")
+            # 班次状态清理超时不阻塞主流程
         except Exception as e:
             logger.error(f"❌ [清除班次状态] 失败: {e}")
+        # 喂狗：班次状态清理完成
+        watchdog.feed()
+        # ===== 结束 =====
 
         try:
             asyncio.create_task(
@@ -319,6 +444,17 @@ async def _dual_shift_hard_reset(
         )
 
         return True
+
+    except asyncio.TimeoutError:
+        # ===== 6. 看门狗超时处理 =====
+        logger.error(
+            f"⏰ [双班硬重置] 整体超时 {chat_id}\n"
+            f"   ├─ 目标日期: {target_date if 'target_date' in locals() else 'unknown'}\n"
+            f"   └─ 超时时间: 300秒"
+        )
+        # 包装为可重试异常，让外层重试机制处理
+        raise HandoverRetryableError(f"换班整体执行超时: {chat_id}")
+        # ===== 结束 =====
 
     except Exception as e:
         logger.error(
@@ -363,10 +499,11 @@ async def _get_activity_configs_batch(activities: List[str]) -> Dict[str, Dict]:
 
 
 # ========== 3. 统一强制结束所有未完成活动（优化版）==========
+@with_execution_phase("force_end_activities")
 async def _force_end_all_unfinished_shifts(
     chat_id: int, now: datetime, target_date: date, business_today: date
 ) -> Dict[str, Any]:
-    """强制结束所有进行中的活动（优化版，批量加载配置）"""
+    """强制结束所有进行中的活动（带看门狗保护）"""
     stats = {
         "total": 0,
         "success": 0,
@@ -375,6 +512,10 @@ async def _force_end_all_unfinished_shifts(
         "night_shift": {"total": 0, "success": 0, "failed": 0},
         "details": [],
     }
+
+    # ===== 创建子任务看门狗 =====
+    watchdog = Watchdog(timeout=120, name=f"force_end_{chat_id}")
+    # ===== 结束 =====
 
     try:
         if not db.pool or not db._initialized:
@@ -420,7 +561,11 @@ async def _force_end_all_unfinished_shifts(
                 )
                 tasks.append(task)
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # ===== 使用看门狗保护并发执行 =====
+            results = await watchdog.run(asyncio.gather(*tasks, return_exceptions=True))
+            # 喂狗
+            watchdog.feed()
+            # ===== 结束 =====
 
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -452,6 +597,10 @@ async def _force_end_all_unfinished_shifts(
             f"   └─ 夜班: {stats['night_shift']['success']}/{stats['night_shift']['total']}"
         )
 
+    except asyncio.TimeoutError:
+        logger.error(f"⏰ [强制结束活动] 超时 {chat_id}")
+        # 超时后包装为可重试异常
+        raise HandoverRetryableError(f"强制结束活动超时: {chat_id}")
     except Exception as e:
         logger.error(f"❌ [强制结束活动] 失败 {chat_id}: {e}")
         logger.error(traceback.format_exc())
@@ -549,7 +698,11 @@ async def _force_end_single_activity_optimized(
 
     except Exception as e:
         logger.error(f"❌ [强制结束] 用户{user_row['user_id']} 失败: {e}")
+        # ===== 新增：根据错误类型抛出适当的异常 =====
+        if "deadlock" in str(e).lower() or "timeout" in str(e).lower():
+            raise HandoverRetryableError(f"可重试错误: {e}") from e
         raise
+        # ===== 新增结束 =====
 
     return result
 
@@ -574,6 +727,9 @@ async def _force_end_single_activity(
 
 
 # ========== 4. 补全未打卡的下班记录（优化版）==========
+# ===== 添加阶段标记 =====
+@with_execution_phase("complete_work_ends")
+# ===== 添加结束 =====
 async def _complete_missing_work_ends(
     chat_id: int, target_date: date, business_today: date
 ) -> Dict[str, Any]:
@@ -804,7 +960,11 @@ async def _complete_single_work_end_optimized(
 
     except Exception as e:
         logger.error(f"❌ [补全下班] 用户{row['user_id']} 失败: {e}")
+        # ===== 新增：根据错误类型抛出适当的异常 =====
+        if "deadlock" in str(e).lower() or "timeout" in str(e).lower():
+            raise HandoverRetryableError(f"可重试错误: {e}") from e
         raise
+        # ===== 新增结束 =====
 
     return result
 
@@ -850,6 +1010,9 @@ async def _cleanup_export_lock(key: str):
             _export_locks.pop(key, None)
 
 
+# ===== 添加阶段标记 =====
+@with_execution_phase("export_data")
+# ===== 添加结束 =====
 async def _export_yesterday_data_concurrent(
     chat_id: int,
     target_date: date,
@@ -928,12 +1091,19 @@ async def _export_yesterday_data_concurrent(
                         logger.error(
                             f"⏰ [数据导出] 群组{chat_id} 第{attempt+1}次尝试超时"
                         )
+                        # ===== 新增：超时错误包装为可重试异常 =====
+                        if attempt < max_attempts - 1:
+                            raise HandoverRetryableError(f"导出超时: {e}") from e
+                        # ===== 新增结束 =====
                     except Exception as e:
                         logger.warning(
                             f"⚠️ [数据导出] 群组{chat_id} 第{attempt+1}次失败: {e}"
                         )
                         if attempt < max_attempts - 1:
                             logger.exception(e)
+                            # ===== 新增：包装为可重试异常 =====
+                            raise HandoverRetryableError(f"导出失败: {e}") from e
+                            # ===== 新增结束 =====
 
                     if attempt < max_attempts - 1:
                         delay = 2**attempt
@@ -1069,6 +1239,10 @@ async def _cleanup_old_data(
     except Exception as e:
         logger.error(f"❌ [数据清理] 失败 {chat_id}: {e}")
         logger.error(traceback.format_exc())
+        # ===== 新增：数据清理错误包装为可重试 =====
+        if "deadlock" in str(e).lower() or "timeout" in str(e).lower():
+            raise HandoverRetryableError(f"清理可重试错误: {e}") from e
+        # ===== 新增结束 =====
 
     return stats
 
@@ -1271,7 +1445,7 @@ async def check_missed_resets_on_startup():
                             stats["completed"] += 1
                             return
 
-                        # 执行重置
+                        # 执行重置 - 这里调用的 handle_hard_reset 已经带有重试装饰器
                         logger.info(f"🔄 自动执行重置: 群组 {chat_id}")
                         success = await handle_hard_reset(
                             chat_id, None, target_date=business_yesterday

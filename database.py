@@ -75,7 +75,7 @@ class PostgreSQLDatabase:
             return False
 
     async def _reconnect(self):
-        """重新建立数据库连接"""
+        """重新建立数据库连接池（修复版）"""
         self._reconnect_attempts += 1
 
         if self._reconnect_attempts > self._max_reconnect_attempts:
@@ -89,11 +89,19 @@ class PostgreSQLDatabase:
             logger.info(f"{delay}秒后尝试第{self._reconnect_attempts}次数据库重连...")
             await asyncio.sleep(delay)
 
-            if self.pool:
-                await self.pool.close()
-
-            self.pool = None
+            # ⚠️ 重要：先标记为未初始化，防止新请求进入
             self._initialized = False
+
+            # 关闭旧连接池（如果有）
+            if self.pool:
+                old_pool = self.pool
+                self.pool = None  # 先置空，防止其他操作使用
+                try:
+                    await old_pool.close()
+                except Exception as close_error:
+                    logger.warning(f"关闭旧连接池时出错: {close_error}")
+
+            # 创建新连接池
             await self._initialize_impl()
 
             self._reconnect_attempts = 0
@@ -104,6 +112,27 @@ class PostgreSQLDatabase:
             if self._reconnect_attempts >= self._max_reconnect_attempts:
                 logger.critical("数据库重连最终失败，服务可能无法正常工作")
             raise
+
+    async def get_pool_stats(self) -> Dict[str, Any]:
+        """获取连接池统计信息"""
+        stats = {
+            "initialized": self._initialized,
+            "pool_exists": self.pool is not None,
+            "reconnect_attempts": self._reconnect_attempts,
+        }
+
+        if self.pool and hasattr(self.pool, "_holders"):
+            try:
+                holders = self.pool._holders
+                stats["total_connections"] = len(holders)
+                stats["active_connections"] = sum(1 for h in holders if h._holder)
+                stats["idle_connections"] = (
+                    stats["total_connections"] - stats["active_connections"]
+                )
+            except Exception as e:
+                stats["pool_stats_error"] = str(e)
+
+        return stats
 
     async def execute_with_retry(
         self,
@@ -117,9 +146,8 @@ class PostgreSQLDatabase:
         timeout: int = 30,
         slow_threshold: float = 1.0,
     ):
-        """带重试和超时的查询执行（增强版：添加死锁重试）"""
+        """带重试和超时的查询执行（修复连接释放问题）"""
 
-        # 使用看门狗保护整个操作，防止协程由于未知原因无限挂起
         watchdog = Watchdog(timeout=timeout + 5, name=operation_name)
 
         async def _execute():
@@ -130,57 +158,54 @@ class PostgreSQLDatabase:
                 raise ValueError("只能指定一种查询类型: fetch, fetchrow 或 fetchval")
 
             for attempt in range(max_retries + 1):
+                conn = None
                 start_time = time.time()
                 try:
-                    async with self.pool.acquire() as conn:
-                        # 喂狗：连接获取成功
-                        watchdog.feed()
+                    # 获取连接
+                    conn = await self.pool.acquire()
+                    watchdog.feed()
 
-                        # 设置 PostgreSQL 语句级的执行超时
-                        await conn.execute(f"SET statement_timeout = {timeout * 1000}")
+                    # 设置语句超时
+                    await conn.execute(f"SET statement_timeout = {timeout * 1000}")
 
-                        # 根据指定的类型执行不同深度的 fetch 操作
-                        if fetch:
-                            result = await conn.fetch(query, *args)
-                        elif fetchrow:
-                            result = await conn.fetchrow(query, *args)
-                        elif fetchval:
-                            result = await conn.fetchval(query, *args)
-                        else:
-                            result = await conn.execute(query, *args)
+                    # 执行查询
+                    if fetch:
+                        result = await conn.fetch(query, *args)
+                    elif fetchrow:
+                        result = await conn.fetchrow(query, *args)
+                    elif fetchval:
+                        result = await conn.fetchval(query, *args)
+                    else:
+                        result = await conn.execute(query, *args)
 
-                        execution_time = time.time() - start_time
-                        watchdog.feed()  # 喂狗：查询完成
+                    execution_time = time.time() - start_time
+                    watchdog.feed()
 
-                        # 慢查询监控与分级日志
-                        if execution_time > slow_threshold:
-                            log_level = (
-                                logging.WARNING
-                                if execution_time < 5.0
-                                else logging.ERROR
-                            )
-                            logger.log(
-                                log_level,
-                                f"⏱️ 慢查询: {operation_name} 耗时 {execution_time:.3f}秒 "
-                                f"(SQL: {query[:100]}{'...' if len(query) > 100 else ''})",
-                            )
-                        return result
+                    # 慢查询监控
+                    if execution_time > slow_threshold:
+                        log_level = (
+                            logging.WARNING if execution_time < 5.0 else logging.ERROR
+                        )
+                        logger.log(
+                            log_level,
+                            f"⏱️ 慢查询: {operation_name} 耗时 {execution_time:.3f}秒 "
+                            f"(SQL: {query[:100]}{'...' if len(query) > 100 else ''})",
+                        )
+
+                    return result
 
                 except asyncpg.DeadlockDetectedError as e:
-                    # 死锁检测：数据库检测到循环依赖锁，自动进行退避重试
                     if attempt == max_retries:
                         logger.error(
                             f"{operation_name} 死锁重试{max_retries}次后失败: {e}"
                         )
                         raise
 
-                    # 指数退避 + 随机抖动（Jitter），防止多个任务在同一时刻重试造成二次死锁
                     retry_delay = min(0.1 * (2**attempt) * (1 + random.random()), 5)
                     logger.warning(
                         f"🔄 检测到死锁，{retry_delay:.2f}秒后第{attempt + 1}次重试: {operation_name}"
                     )
                     await asyncio.sleep(retry_delay)
-                    continue
 
                 except (
                     asyncpg.PostgresConnectionError,
@@ -188,7 +213,6 @@ class PostgreSQLDatabase:
                     asyncpg.InterfaceError,
                     ConnectionError,
                 ) as e:
-                    # 连接类异常：尝试重连并重试
                     if attempt == max_retries:
                         logger.error(
                             f"{operation_name} 数据库重试{max_retries}次后失败: {e}"
@@ -199,11 +223,12 @@ class PostgreSQLDatabase:
                     logger.warning(
                         f"{operation_name} 数据库连接异常，{retry_delay}秒后第{attempt + 1}次重试: {e}"
                     )
-                    await self._reconnect()
+
+                    # ⚠️ 重要：不要在这里调用 _reconnect()！
+                    # 让连接池自己处理坏连接
                     await asyncio.sleep(retry_delay)
 
                 except asyncpg.QueryCanceledError:
-                    # 处理超时的取消异常
                     logger.error(
                         f"{operation_name} 查询超时被取消 (超时设置: {timeout}秒)"
                     )
@@ -212,14 +237,20 @@ class PostgreSQLDatabase:
                     await asyncio.sleep(1)
 
                 except Exception as e:
-                    # 业务或语法错误：不重试，直接抛出并记录
                     if "database" in str(e).lower() or "sql" in str(e).lower():
                         logger.error(f"{operation_name} 数据库操作失败: {e}")
                     else:
                         logger.error(f"{operation_name} 操作失败: {e}")
                     raise
 
-        # 使用熔断器保护：如果数据库大面积崩溃，熔断器会快速失败，保护系统内存不被挂起的协程占满
+                finally:
+                    # 确保连接被释放
+                    if conn:
+                        try:
+                            await self.pool.release(conn)
+                        except Exception as release_error:
+                            logger.warning(f"释放连接失败: {release_error}")
+
         return await db_circuit_breaker.call(_execute)
 
     # ========== 定期维护任务 ==========

@@ -6398,7 +6398,6 @@ async def handle_admin_panel_button(message: types.Message):
     admin_text = (
         "👑 <b>管理员面板</b>\n"
         "━━━━━━━━━━━━━━━━\n\n"
-        
         "📢 <b>频道与推送</b>\n"
         "├ <code>/setchannel [ID]</code>\n"
         "├ <code>/setgroup [ID]</code>\n"
@@ -6408,25 +6407,21 @@ async def handle_admin_panel_button(message: types.Message):
         "├ <code>/showeverypush</code>\n"
         "│ 目标: ch|gr|ad\n"
         "│ 开关: on|off\n\n"
-        
         "🎯 <b>活动管理</b>\n"
         "├ <code>/addactivity [名] [次] [分]</code>\n"
         "├ <code>/delactivity [名]</code>\n"
         "├ <code>/actnum [名] [人数]</code>\n"
         "└ <code>/actstatus</code>\n\n"
-        
         "💰 <b>罚款管理</b>\n"
         "├ <code>/setfine [名] [段] [元]</code>\n"
         "├ <code>/setfines_all [段1] [元1] ...</code>\n"
         "├ <code>/setworkfine [类型] [分] [元]</code>\n"
         "└ <code>/finesstatus</code>\n"
         "  类型: start|end\n\n"
-        
         "🔄 <b>重置设置</b>\n"
         "├ <code>/setresettime [时] [分]</code>\n"
         "├ <code>/resetuser [用户ID]</code>\n"
         "└ <code>/resettime</code>\n\n"
-        
         "⏰ <b>上下班管理</b>\n"
         "├ <code>/setdualmode on 9:00 21:00</code>\n"
         "├ <code>/setworktime [上] [下]</code>\n"
@@ -6436,7 +6431,6 @@ async def handle_admin_panel_button(message: types.Message):
         "├ <code>/checkdual</code>\n"
         "├ <code>/delwork</code>\n"
         "└ <code>/delwork_clear</code>\n\n"
-        
         "🔄 <b>换班管理</b>\n"
         "├ <code>/handover</code> - 查看当前换班状态\n"
         "├ <code>/handoverconfig</code> - 查看换班配置\n"
@@ -6447,7 +6441,6 @@ async def handle_admin_panel_button(message: types.Message):
         "├ <code>/sethour [类型] [小时]</code> - 设置工作时长\n"
         "│  类型: handover_night|handover_day|normal_night|normal_day\n"
         "│  ╰ 示例: /sethour handover_night 18\n\n"
-        
         "📊 <b>数据管理</b>\n"
         "├ <code>/export</code>\n"
         "├ <code>/exportmonthly [年] [月]</code>\n"
@@ -6456,14 +6449,11 @@ async def handle_admin_panel_button(message: types.Message):
         "├ <code>/monthly_stats_status</code>\n"
         "├ <code>/cleanup_inactive [天]</code>\n"
         "└ <code>/fixmessages</code> - 修复消息引用\n\n"
-        
         "💾 <b>数据显示</b>\n"
         "└ <code>/showsettings</code>\n\n"
-        
         "🔧 <b>调试工具</b>\n"
         "├ <code>/testgroupaccess [群组ID]</code> - 测试群组访问\n"
         "└ <code>/checkperms</code> - 检查机器人权限\n\n"
-        
         "━━━━━━━━━━━━━━━━\n"
         "<i>💡 提示：发送 /help [命令] 查看详情</i>"
     )
