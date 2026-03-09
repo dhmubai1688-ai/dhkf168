@@ -7659,13 +7659,32 @@ async def export_and_push_csv(
                     format_shift_for_export(user_data.get("shift", "day")),
                 ]
 
+                # 从 daily_statistics 或 user_activities 获取活动数据
                 activities = user_data.get("activities", {})
+
+                # 调试日志：查看 activities 的结构
+                logger.debug(f"用户 {user_data.get('user_id')} activities 结构: {activities}")
+
                 for act in activity_names:
+                    # 尝试多种方式获取活动数据
                     activity_info = activities.get(act, {})
-                    count = safe_int(activity_info.get("count"))
-                    time_seconds = safe_int(activity_info.get("time"))
+                    
+                    # 如果 activity_info 不是字典，尝试其他格式
+                    if not isinstance(activity_info, dict):
+                        logger.warning(f"活动 {act} 数据格式异常: {activity_info}")
+                        count = 0
+                        time_seconds = 0
+                    else:
+                        # 检查可能的字段名
+                        count = safe_int(activity_info.get("count") or activity_info.get("activity_count") or 0)
+                        time_seconds = safe_int(activity_info.get("time") or activity_info.get("accumulated_time") or 0)
+                    
                     row.append(count)
                     row.append(safe_format_time(time_seconds))
+
+                    # 调试日志
+                    if count > 0 or time_seconds > 0:
+                        logger.debug(f"用户 {user_data.get('user_id')} {act}: 次数={count}, 时长={time_seconds}秒")
 
                 row.extend(
                     [
