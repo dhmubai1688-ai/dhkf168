@@ -7265,7 +7265,7 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
 
 
 async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[Dict]:
-    """从月度统计表获取群组统计数据"""
+    """从月度统计表获取群组统计数据 - 优化版"""
     try:
         month_start = target_date.replace(day=1)
 
@@ -7281,11 +7281,113 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             logger.warning(f"⚠️ 月度表中没有找到 {month_start} 的数据")
             return []
 
+        # ---------- 获取所有活动名称（只执行一次） ----------
+        activity_names = set()
+
+        try:
+            from database import db as database_db
+            activity_limits = await database_db.get_activity_limits_cached()
+            activity_names.update(activity_limits.keys())
+        except Exception:
+            activity_limits = {}
+
         result = []
+
         for stat in monthly_stats:
+            raw_activities = stat.get("activities", {})
+
+            # ---------- JSON解析 ----------
+            if isinstance(raw_activities, str):
+                try:
+                    import json
+                    raw_activities = json.loads(raw_activities)
+                except Exception:
+                    raw_activities = {}
+
+            if isinstance(raw_activities, dict):
+                activity_names.update(raw_activities.keys())
+
+            formatted_activities = {}
+
+            # ---------- 统一处理活动 ----------
+            for act_name in activity_names:
+
+                act_data = (
+                    raw_activities.get(act_name, {})
+                    if isinstance(raw_activities, dict)
+                    else {}
+                )
+
+                count = 0
+                time_val = 0
+
+                if isinstance(act_data, dict):
+                    count = act_data.get("count", act_data.get("activity_count", 0))
+                    time_val = act_data.get("time", act_data.get("accumulated_time", 0))
+
+                elif isinstance(act_data, (int, float)):
+                    count = 1 if act_data > 0 else 0
+                    time_val = act_data
+
+                elif isinstance(act_data, str):
+                    try:
+                        import json
+                        parsed = json.loads(act_data)
+                        if isinstance(parsed, dict):
+                            count = parsed.get(
+                                "count", parsed.get("activity_count", 0)
+                            )
+                            time_val = parsed.get(
+                                "time", parsed.get("accumulated_time", 0)
+                            )
+                    except Exception:
+                        pass
+
+                # ---------- 类型安全 ----------
+                try:
+                    count = int(float(count)) if count else 0
+                except Exception:
+                    count = 0
+
+                try:
+                    time_val = int(float(time_val)) if time_val else 0
+                except Exception:
+                    time_val = 0
+
+                if count > 0 or time_val > 0:
+                    formatted_activities[act_name] = {
+                        "count": count,
+                        "time": time_val,
+                    }
+
+            # ---------- fallback: 从字段恢复活动 ----------
+            if not formatted_activities:
+
+                exclude_fields = {
+                    "user_id","nickname","shift","statistic_date",
+                    "total_accumulated_time","total_activity_count","total_fines",
+                    "overtime_count","total_overtime_time","work_days","work_hours",
+                    "work_start_count","work_end_count","work_start_fines","work_end_fines",
+                    "late_count","early_count","created_at","updated_at","id","chat_id"
+                }
+
+                for key, value in stat.items():
+
+                    if (
+                        key not in exclude_fields
+                        and not key.endswith(("_count", "_time", "_fines"))
+                        and isinstance(value, (int, float))
+                        and value > 0
+                    ):
+                        formatted_activities[key] = {
+                            "count": 0,
+                            "time": int(value),
+                        }
+
             user_data = {
                 "user_id": stat.get("user_id", 0),
                 "nickname": stat.get("nickname", f"用户{stat.get('user_id', 0)}"),
+                "shift": stat.get("shift", "day"),
                 "total_accumulated_time": stat.get("total_accumulated_time", 0),
                 "total_activity_count": stat.get("total_activity_count", 0),
                 "total_fines": stat.get("total_fines", 0),
@@ -7299,29 +7401,28 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
                 "work_end_fines": stat.get("work_end_fines", 0),
                 "late_count": stat.get("late_count", 0),
                 "early_count": stat.get("early_count", 0),
-                "activities": stat.get("activities", {}),
+                "activities": formatted_activities,
             }
 
             logger.debug(
-                f"📊 从月度表加载用户 {user_data['user_id']} 数据: "
-                f"工作天数={user_data['work_days']}, "
-                f"工作时长={user_data['work_hours']}秒, "
-                f"上班次数={user_data['work_start_count']}, "
-                f"下班次数={user_data['work_end_count']}"
+                f"📊 用户 {user_data['user_id']} | "
+                f"工作天数:{user_data['work_days']} "
+                f"工作时长:{user_data['work_hours']}秒 "
+                f"活动:{list(formatted_activities.keys())}"
             )
 
             result.append(user_data)
 
         logger.info(
-            f"✅ 从月度表成功获取 {target_date} 的完整数据，共 {len(result)} 个用户"
+            f"✅ 从月度表成功获取 {target_date} 数据，共 {len(result)} 个用户"
         )
+
         return result
 
     except Exception as e:
         logger.error(f"❌ 从月度表获取数据失败: {e}")
         logger.error(traceback.format_exc())
         return []
-
 
 async def export_and_push_csv(
     chat_id: int,
@@ -7663,12 +7764,14 @@ async def export_and_push_csv(
                 activities = user_data.get("activities", {})
 
                 # 调试日志：查看 activities 的结构
-                logger.debug(f"用户 {user_data.get('user_id')} activities 结构: {activities}")
+                logger.debug(
+                    f"用户 {user_data.get('user_id')} activities 结构: {activities}"
+                )
 
                 for act in activity_names:
                     # 尝试多种方式获取活动数据
                     activity_info = activities.get(act, {})
-                    
+
                     # 如果 activity_info 不是字典，尝试其他格式
                     if not isinstance(activity_info, dict):
                         logger.warning(f"活动 {act} 数据格式异常: {activity_info}")
@@ -7676,15 +7779,25 @@ async def export_and_push_csv(
                         time_seconds = 0
                     else:
                         # 检查可能的字段名
-                        count = safe_int(activity_info.get("count") or activity_info.get("activity_count") or 0)
-                        time_seconds = safe_int(activity_info.get("time") or activity_info.get("accumulated_time") or 0)
-                    
+                        count = safe_int(
+                            activity_info.get("count")
+                            or activity_info.get("activity_count")
+                            or 0
+                        )
+                        time_seconds = safe_int(
+                            activity_info.get("time")
+                            or activity_info.get("accumulated_time")
+                            or 0
+                        )
+
                     row.append(count)
                     row.append(safe_format_time(time_seconds))
 
                     # 调试日志
                     if count > 0 or time_seconds > 0:
-                        logger.debug(f"用户 {user_data.get('user_id')} {act}: 次数={count}, 时长={time_seconds}秒")
+                        logger.debug(
+                            f"用户 {user_data.get('user_id')} {act}: 次数={count}, 时长={time_seconds}秒"
+                        )
 
                 row.extend(
                     [
