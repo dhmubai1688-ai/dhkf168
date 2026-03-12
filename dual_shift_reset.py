@@ -733,7 +733,7 @@ async def _force_end_single_activity(
 async def _complete_missing_work_ends(
     chat_id: int, target_date: date, business_today: date
 ) -> Dict[str, Any]:
-    """为昨天有上班记录但没有下班记录的用户补全下班记录（优化版）"""
+    """为昨天有上班记录但没有下班记录的用户补全下班记录（修复夜班查询版）"""
     stats = {
         "total": 0,
         "success": 0,
@@ -749,24 +749,29 @@ async def _complete_missing_work_ends(
             return stats
 
         async with db.pool.acquire() as conn:
-            rows = await conn.fetch(
+            # ===== 修改1：分开查询白班和夜班 =====
+            
+            # 查询白班：上班记录日期 = target_date，下班记录日期也应该是 target_date
+            day_rows = await conn.fetch(
                 """
                 SELECT 
                     wr.user_id,
                     wr.shift,
                     wr.shift_detail,
                     wr.checkin_time as work_start_time,
-                    u.nickname
+                    u.nickname,
+                    wr.record_date
                 FROM work_records wr
                 JOIN users u ON wr.chat_id = u.chat_id AND wr.user_id = u.user_id
                 WHERE wr.chat_id = $1
                   AND wr.record_date = $2
+                  AND wr.shift = 'day'
                   AND wr.checkin_type = 'work_start'
                   AND NOT EXISTS(
                       SELECT 1 FROM work_records wr2
                       WHERE wr2.chat_id = wr.chat_id
                         AND wr2.user_id = wr.user_id
-                        AND wr2.record_date = wr.record_date
+                        AND wr2.record_date = wr.record_date  -- 白班下班记录在同一天
                         AND wr2.shift = wr.shift
                         AND wr2.checkin_type = 'work_end'
                   )
@@ -774,14 +779,52 @@ async def _complete_missing_work_ends(
                 chat_id,
                 target_date,
             )
+            
+            # ===== 修改2：查询夜班 - 检查第二天是否有下班记录 =====
+            # 夜班上班日期是 target_date，但下班应该在 target_date + 1
+            night_next_date = target_date + timedelta(days=1)
+            
+            night_rows = await conn.fetch(
+                """
+                SELECT 
+                    wr.user_id,
+                    wr.shift,
+                    wr.shift_detail,
+                    wr.checkin_time as work_start_time,
+                    u.nickname,
+                    wr.record_date
+                FROM work_records wr
+                JOIN users u ON wr.chat_id = u.chat_id AND wr.user_id = u.user_id
+                WHERE wr.chat_id = $1
+                  AND wr.record_date = $2
+                  AND wr.shift = 'night'
+                  AND wr.checkin_type = 'work_start'
+                  AND NOT EXISTS(
+                      SELECT 1 FROM work_records wr2
+                      WHERE wr2.chat_id = wr.chat_id
+                        AND wr2.user_id = wr.user_id
+                        AND wr2.record_date = $3  -- 检查第二天是否有下班记录
+                        AND wr2.shift = wr.shift
+                        AND wr2.checkin_type = 'work_end'
+                  )
+                """,
+                chat_id,
+                target_date,      # $2: 上班日期
+                night_next_date,   # $3: 下班应该有的日期
+            )
 
+            # 合并结果
+            rows = list(day_rows) + list(night_rows)
             stats["total"] = len(rows)
 
             if not rows:
                 logger.info(f"📝 群组 {chat_id} 昨日没有未下班的用户")
                 return stats
 
-            logger.info(f"📝 发现 {len(rows)} 个昨日未下班的用户，开始补全记录...")
+            logger.info(
+                f"📝 发现 {len(rows)} 个昨日未下班的用户 "
+                f"(白班:{len(day_rows)}人，夜班:{len(night_rows)}人)，开始补全记录..."
+            )
 
             group_data = await db.get_group_cached(chat_id)
             reset_hour = group_data.get("reset_hour", 0)
@@ -795,6 +838,8 @@ async def _complete_missing_work_ends(
 
             tasks = []
             for row in rows:
+                # 注意：这里传入 target_date，但 _complete_single_work_end_optimized
+                # 内部会根据班次自动计算正确的下班日期
                 task = asyncio.create_task(
                     _complete_single_work_end_optimized(
                         chat_id,
@@ -827,10 +872,8 @@ async def _complete_missing_work_ends(
                         stats["night_shift"]["success"] += 1
                     stats["details"].append(result)
 
-            stats["day_shift"]["total"] = sum(1 for r in rows if r["shift"] == "day")
-            stats["night_shift"]["total"] = sum(
-                1 for r in rows if r["shift"] == "night"
-            )
+            stats["day_shift"]["total"] = len(day_rows)  # 直接从 day_rows 获取总数
+            stats["night_shift"]["total"] = len(night_rows)  # 直接从 night_rows 获取总数
 
         logger.info(
             f"✅ [补全下班记录完成] 群组 {chat_id}\n"
@@ -1501,3 +1544,4 @@ async def check_missed_resets_on_startup():
     except Exception as e:
         logger.error(f"❌ 启动检查异常: {e}")
         logger.error(traceback.format_exc())
+
