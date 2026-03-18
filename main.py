@@ -82,6 +82,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
+from main import calculate_fine
 
 # 在现有的导入后面添加
 from dual_shift_reset import (
@@ -1751,18 +1752,16 @@ async def _process_back_locked(
                 forced_date,  # 使用强制归档的日期
             )
 
-            # 查询今天的累计时间和次数（从 daily_statistics 表）
+            # 查询今天的累计时间和次数
             today_stats_row = await conn.fetchrow(
                 """
                 SELECT 
                     COALESCE(SUM(accumulated_time), 0) as total_time,
                     COALESCE(SUM(activity_count), 0) as total_count
-                FROM daily_statistics
+                FROM user_activities
                 WHERE chat_id = $1 
                   AND user_id = $2 
-                  AND record_date = $3
-                  AND activity_name NOT IN ('total_fines', 'work_fines', 
-                                           'work_start_fines', 'work_end_fines')
+                  AND activity_date = $3
                 """,
                 chat_id,
                 uid,
@@ -3153,16 +3152,11 @@ async def send_work_notification(
                                 await conn.fetchval(
                                     """
                                     SELECT COALESCE(SUM(accumulated_time), 0)
-                                    FROM daily_statistics 
+                                    FROM user_activities 
                                     WHERE chat_id = $1 
                                       AND user_id = $2 
-                                      AND record_date = $3
+                                      AND activity_date = $3
                                       AND shift = 'night'
-                                      AND activity_name NOT IN (
-                                          'work_days', 'work_hours', 'work_fines', 
-                                          'work_start_fines', 'work_end_fines',
-                                          'overtime_count', 'overtime_time', 'total_fines'
-                                      )
                                     """,
                                     chat_id,
                                     user_id,
@@ -3181,16 +3175,11 @@ async def send_work_notification(
                                 await conn.fetchval(
                                     """
                                     SELECT COALESCE(SUM(accumulated_time), 0)
-                                    FROM daily_statistics 
+                                    FROM user_activities 
                                     WHERE chat_id = $1 
                                       AND user_id = $2 
-                                      AND record_date = $3
+                                      AND activity_date = $3
                                       AND shift = 'day'
-                                      AND activity_name NOT IN (
-                                          'work_days', 'work_hours', 'work_fines', 
-                                          'work_start_fines', 'work_end_fines',
-                                          'overtime_count', 'overtime_time', 'total_fines'
-                                      )
                                     """,
                                     chat_id,
                                     user_id,
@@ -4847,7 +4836,20 @@ async def cmd_delwork_clear(message: types.Message):
         try:
             await db.execute_with_retry(
                 "清理月度工作统计",
-                "DELETE FROM monthly_statistics WHERE chat_id = $1 AND activity_name IN ('work_days', 'work_hours')",
+                """
+                UPDATE monthly_statistics 
+                SET 
+                    work_days = 0,
+                    work_hours = 0,
+                    work_start_count = 0,
+                    work_end_count = 0,
+                    work_start_fines = 0,
+                    work_end_fines = 0,
+                    late_count = 0,
+                    early_count = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = $1
+                """,
                 chat_id,
             )
         except Exception as e:
@@ -6891,18 +6893,16 @@ async def show_history(message: types.Message, shift: str = None):
             fine_total = (
                 await conn.fetchval(
                     """
-                SELECT COALESCE(SUM(accumulated_time), 0)
-                FROM daily_statistics
-                WHERE chat_id = $1 
-                  AND user_id = $2 
-                  AND record_date = $3 
-                  AND shift = $4
-                  AND activity_name IN ('total_fines', 'work_fines', 
-                                       'work_start_fines', 'work_end_fines')
-                """,
+                    SELECT COALESCE(fine_amount, 0)
+                    FROM daily_statistics
+                    WHERE chat_id = $1 
+                      AND user_id = $2 
+                      AND record_date = $3 
+                      AND shift = $4
+                    """,
                     chat_id,
                     uid,
-                    fine_query_date,  # ✅ 使用修复后的日期
+                    fine_query_date,
                     shift,
                 )
                 or 0
@@ -6919,14 +6919,12 @@ async def show_history(message: types.Message, shift: str = None):
             fine_total = (
                 await conn.fetchval(
                     """
-                SELECT COALESCE(SUM(accumulated_time), 0)
-                FROM daily_statistics
-                WHERE chat_id = $1 
-                  AND user_id = $2 
-                  AND record_date = $3 
-                  AND activity_name IN ('total_fines', 'work_fines', 
-                                       'work_start_fines', 'work_end_fines')
-                """,
+                    SELECT COALESCE(SUM(fine_amount), 0)
+                    FROM daily_statistics
+                    WHERE chat_id = $1 
+                      AND user_id = $2 
+                      AND record_date = $3
+                    """,
                     chat_id,
                     uid,
                     fine_query_date,
@@ -7067,26 +7065,28 @@ async def show_rank(message: types.Message, shift: str = None):
 
                 query = """
                     SELECT 
-                        ds.user_id,
+                        ua.user_id,
                         u.nickname,
-                        SUM(ds.accumulated_time) AS total_time,
-                        SUM(ds.activity_count) AS total_count,
+                        SUM(ua.accumulated_time) AS total_time,
+                        SUM(ua.activity_count) AS total_count,
                         CASE 
-                            WHEN u.current_activity = $1 
-                            THEN TRUE 
+                            WHEN u.current_activity = $1 THEN TRUE 
                             ELSE FALSE 
                         END AS is_active
-                    FROM daily_statistics ds
+                    FROM user_activities ua
                     LEFT JOIN users u 
-                        ON ds.chat_id = u.chat_id 
-                       AND ds.user_id = u.user_id
-                    WHERE ds.chat_id = $2
-                      AND ds.record_date = $3
-                      AND ds.activity_name = $4
-                      AND ds.shift = $5
-                    GROUP BY ds.user_id, u.nickname, u.current_activity
-                    HAVING SUM(ds.accumulated_time) > 0 OR u.current_activity = $1
-                    ORDER BY total_time DESC
+                        ON ua.chat_id = u.chat_id 
+                        AND ua.user_id = u.user_id
+                    WHERE ua.chat_id = $2
+                      AND ua.activity_date = $3
+                      AND ua.activity_name = $4
+                      AND ua.shift = $5
+                    GROUP BY ua.user_id, u.nickname, u.current_activity
+                    HAVING SUM(ua.accumulated_time) > 0 
+                        OR u.current_activity = $1
+                    ORDER BY 
+                        is_active DESC,
+                        total_time DESC
                     LIMIT 10
                 """
                 params = [act, chat_id, query_date, act, shift]
@@ -7101,24 +7101,24 @@ async def show_rank(message: types.Message, shift: str = None):
 
                     query = """
                         SELECT 
-                            ds.user_id,
+                            ua.user_id,
                             u.nickname,
-                            SUM(ds.accumulated_time) AS total_time,
-                            SUM(ds.activity_count) AS total_count,
+                            SUM(ua.accumulated_time) AS total_time,
+                            SUM(ua.activity_count) AS total_count,
                             CASE 
                                 WHEN u.current_activity = $1 
                                 THEN TRUE 
                                 ELSE FALSE 
                             END AS is_active
-                        FROM daily_statistics ds
+                        FROM user_activities ua
                         LEFT JOIN users u 
-                            ON ds.chat_id = u.chat_id 
-                           AND ds.user_id = u.user_id
-                        WHERE ds.chat_id = $2
-                          AND ds.record_date = $3
-                          AND ds.activity_name = $4
-                        GROUP BY ds.user_id, u.nickname, u.current_activity
-                        HAVING SUM(ds.accumulated_time) > 0 OR u.current_activity = $1
+                            ON ua.chat_id = u.chat_id 
+                            AND ua.user_id = u.user_id
+                        WHERE ua.chat_id = $2
+                          AND ua.activity_date = $3
+                          AND ua.activity_name = $4
+                        GROUP BY ua.user_id, u.nickname, u.current_activity
+                        HAVING SUM(ua.accumulated_time) > 0 OR u.current_activity = $1
                         ORDER BY total_time DESC
                         LIMIT 10
                     """
@@ -7127,27 +7127,27 @@ async def show_rank(message: types.Message, shift: str = None):
                     logger.debug(f"☀️ [排行榜-全部] 正常查询当天: {business_date}")
 
                     query = """
-                        SELECT 
-                            ds.user_id,
-                            u.nickname,
-                            SUM(ds.accumulated_time) AS total_time,
-                            SUM(ds.activity_count) AS total_count,
-                            CASE 
-                                WHEN u.current_activity = $1 
-                                THEN TRUE 
-                                ELSE FALSE 
-                            END AS is_active
-                        FROM daily_statistics ds
-                        LEFT JOIN users u 
-                            ON ds.chat_id = u.chat_id 
-                           AND ds.user_id = u.user_id
-                        WHERE ds.chat_id = $2
-                          AND ds.record_date = $3
-                          AND ds.activity_name = $4
-                        GROUP BY ds.user_id, u.nickname, u.current_activity
-                        HAVING SUM(ds.accumulated_time) > 0 OR u.current_activity = $1
-                        ORDER BY total_time DESC
-                        LIMIT 10
+                            SELECT 
+                                ua.user_id,
+                                u.nickname,
+                                SUM(ua.accumulated_time) AS total_time,
+                                SUM(ua.activity_count) AS total_count,
+                                CASE 
+                                    WHEN u.current_activity = $1 
+                                    THEN TRUE 
+                                    ELSE FALSE 
+                                END AS is_active
+                            FROM user_activities ua
+                            LEFT JOIN users u 
+                                ON ua.chat_id = u.chat_id 
+                                AND ua.user_id = u.user_id
+                            WHERE ua.chat_id = $2
+                              AND ua.activity_date = $3
+                              AND ua.activity_name = $4
+                            GROUP BY ua.user_id, u.nickname, u.current_activity
+                            HAVING SUM(ua.accumulated_time) > 0 OR u.current_activity = $1
+                            ORDER BY total_time DESC
+                            LIMIT 10
                     """
                     params = [act, chat_id, business_date, act]
 

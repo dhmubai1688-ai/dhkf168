@@ -1121,41 +1121,52 @@ async def _execute_work_end_operations(
             row.get("shift_detail", row["shift"]),
         )
 
-        # 2. 更新日统计（使用 upsert）
+        # 2. 确保 daily_statistics 记录存在
         await conn.execute(
             """
-            INSERT INTO daily_statistics
-            (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
-            VALUES ($1, $2, $3, 'work_hours', $4, $5)
-            ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
-            DO UPDATE SET
-                accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
-                updated_at = CURRENT_TIMESTAMP
+            INSERT INTO daily_statistics (chat_id, user_id, record_date, shift)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (chat_id, user_id, record_date, shift) DO NOTHING
             """,
             chat_id,
             row["user_id"],
             target_date,
-            work_duration,
             row["shift"],
         )
 
-        # 3. 如果有罚款，更新罚款统计
-        if fine_amount > 0:
+        # 3. 更新工作时长
+        if work_duration > 0:
             await conn.execute(
                 """
-                INSERT INTO daily_statistics
-                (chat_id, user_id, record_date, activity_name, accumulated_time, shift)
-                VALUES ($1, $2, $3, 'work_end_fines', $4, $5)
-                ON CONFLICT (chat_id, user_id, record_date, activity_name, shift)
-                DO UPDATE SET
-                    accumulated_time = daily_statistics.accumulated_time + EXCLUDED.accumulated_time,
+                UPDATE daily_statistics
+                SET work_hours = work_hours + $5,
+                    work_days = work_days + 1,
                     updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = $1 AND user_id = $2 
+                  AND record_date = $3 AND shift = $4
                 """,
                 chat_id,
                 row["user_id"],
                 target_date,
-                fine_amount,
                 row["shift"],
+                work_duration,
+            )
+
+        # 4. 如果有罚款，更新罚款统计
+        if fine_amount > 0:
+            await conn.execute(
+                """
+                UPDATE daily_statistics
+                SET work_end_fines = work_end_fines + $5,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE chat_id = $1 AND user_id = $2 
+                  AND record_date = $3 AND shift = $4
+                """,
+                chat_id,
+                row["user_id"],
+                target_date,
+                row["shift"],
+                fine_amount,
             )
 
 
@@ -1564,7 +1575,7 @@ async def recover_shift_states():
 
                 if not db.pool or not db._initialized:
                     logger.error("数据库连接池未初始化")
-                    return stats
+                    return 0
 
                 async with db.pool.acquire() as conn:
                     rows = await conn.fetch(
