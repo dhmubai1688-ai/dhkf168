@@ -56,6 +56,7 @@ from utils import (
     rate_limit,
     send_reset_notification,
     user_rate_limit,
+    calculate_fine,
 )
 
 from fault_tolerance import (
@@ -82,7 +83,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
-from main import calculate_fine
 
 # 在现有的导入后面添加
 from dual_shift_reset import (
@@ -811,47 +811,6 @@ async def can_perform_activities(
     shift_text = "白班" if check_shift == "day" else "夜班"
     logger.info(f"✅ [活动检查] 用户={uid} 允许执行活动（班次：{shift_text}）")
     return True, ""
-
-
-async def calculate_fine(activity: str, overtime_minutes: float) -> int:
-    """计算罚款金额"""
-    fine_rates = await db.get_fine_rates_for_activity(activity)
-    if not fine_rates:
-        return 0
-
-    segments = []
-    for time_key in fine_rates.keys():
-        try:
-            if isinstance(time_key, str) and "min" in time_key.lower():
-                time_value = int(time_key.lower().replace("min", "").strip())
-            else:
-                time_value = int(time_key)
-            segments.append(time_value)
-        except (ValueError, TypeError):
-            continue
-
-    if not segments:
-        return 0
-
-    segments.sort()
-
-    applicable_fine = 0
-    for segment in segments:
-        if overtime_minutes <= segment:
-            original_key = str(segment)
-            if original_key not in fine_rates:
-                original_key = f"{segment}min"
-            applicable_fine = fine_rates.get(original_key, 0)
-            break
-
-    if applicable_fine == 0 and segments:
-        max_segment = segments[-1]
-        original_key = str(max_segment)
-        if original_key not in fine_rates:
-            original_key = f"{max_segment}min"
-        applicable_fine = fine_rates.get(original_key, 0)
-
-    return applicable_fine
 
 
 # ========== 键盘生成 ==========
