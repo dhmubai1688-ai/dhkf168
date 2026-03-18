@@ -593,11 +593,12 @@ class UserLockManager:
 
 
 class ActivityTimerManager:
-    """活动定时器管理器"""
+    """活动定时器管理器 - 高性能索引版"""
 
     def __init__(self):
-        self._timers = {}
-        self.active_timers = {}
+        self.timers: Dict[Tuple[int, int, str], Dict] = {}
+        self.user_index: Dict[Tuple[int, int], set] = {}
+        self.chat_index: Dict[int, set] = {}
         self._lock = asyncio.Lock()
         self._cleanup_interval = 300
         self._last_cleanup = time.time()
@@ -616,10 +617,13 @@ class ActivityTimerManager:
         shift: str = "day",
     ) -> bool:
         """启动活动定时器"""
-        timer_key = f"{chat_id}-{uid}-{shift}"
+        key = (chat_id, uid, shift)
 
-        if timer_key in self.active_timers:
-            await self.cancel_timer(timer_key, preserve_message=False)
+        # 如果已存在相同定时器，先取消
+        if key in self.timers:
+            await self.cancel_timer(
+                chat_id=chat_id, uid=uid, shift=shift, preserve_message=False
+            )
 
         if not self.activity_timer_callback:
             logger.error("ActivityTimerManager: 未设置回调函数")
@@ -627,130 +631,152 @@ class ActivityTimerManager:
 
         timer_task = asyncio.create_task(
             self._activity_timer_wrapper(chat_id, uid, act, limit, shift),
-            name=f"timer_{timer_key}",
+            name=f"timer_{chat_id}_{uid}_{shift}",
         )
 
-        self.active_timers[timer_key] = {
-            "task": timer_task,
-            "activity": act,
-            "limit": limit,
-            "shift": shift,
-            "chat_id": chat_id,
-            "uid": uid,
-        }
+        async with self._lock:
+            # 存储定时器信息
+            self.timers[key] = {
+                "task": timer_task,
+                "activity": act,
+                "limit": limit,
+                "shift": shift,
+                "chat_id": chat_id,
+                "uid": uid,
+                "start_time": time.time(),
+            }
 
-        logger.info(f"⏰ 启动定时器: {timer_key} - {act}（班次: {shift}）")
+            # 维护用户索引
+            user_key = (chat_id, uid)
+            if user_key not in self.user_index:
+                self.user_index[user_key] = set()
+            self.user_index[user_key].add(key)
+
+            # 维护群组索引
+            if chat_id not in self.chat_index:
+                self.chat_index[chat_id] = set()
+            self.chat_index[chat_id].add(key)
+
+        logger.info(f"⏰ 启动定时器: {chat_id}-{uid}-{shift} - {act}")
         return True
 
-    async def cancel_timer(self, timer_key: str, preserve_message: bool = False):
-        """取消并清理指定的定时器 - 紧凑优化版"""
-        # 获取需要取消的 key 列表（支持前缀匹配，如取消某个群组的所有定时器）
-        keys_to_cancel = [
-            k for k in self.active_timers.keys() if k.startswith(timer_key)
-        ]
+    async def cancel_timer(
+        self, chat_id=None, uid=None, shift=None, preserve_message=False
+    ):
+        """
+        支持三种取消方式：
+        1. 精确: chat_id + uid + shift
+        2. 用户级: chat_id + uid
+        3. 群级: chat_id
+        """
+        keys_to_cancel = set()
 
-        if not keys_to_cancel:
-            return 0
-
-        cancelled_count = 0
-        tasks_to_cancel = []
-        cleanup_tasks = []
-
-        # 第 1 步：在锁保护下收集信息，快速释放锁以提高并发性能
         async with self._lock:
-            for key in keys_to_cancel:
-                timer_info = self.active_timers.pop(key, None)
-                if timer_info:
-                    task = timer_info.get("task")
-                    if task:
-                        tasks_to_cancel.append((key, task))
-                        # 如果不需要保留消息，记录需要清理数据库的 chat_id 和 uid
-                        if not preserve_message:
-                            chat_id = timer_info.get("chat_id")
-                            uid = timer_info.get("uid")
-                            if chat_id and uid:
-                                cleanup_tasks.append((key, chat_id, uid))
-                        cancelled_count += 1
+            # 🎯 精确取消
+            if chat_id is not None and uid is not None and shift is not None:
+                key = (chat_id, uid, shift)
+                if key in self.timers:
+                    keys_to_cancel.add(key)
 
-        # 第 2 步：批量取消异步任务
+            # 👤 用户级取消
+            elif chat_id is not None and uid is not None:
+                keys_to_cancel = self.user_index.get((chat_id, uid), set()).copy()
+
+            # 💬 群级取消
+            elif chat_id is not None:
+                keys_to_cancel = self.chat_index.get(chat_id, set()).copy()
+
+            if not keys_to_cancel:
+                return 0
+
+            tasks_to_cancel = []
+            cleanup_tasks = []
+
+            for key in keys_to_cancel:
+                timer_info = self.timers.pop(key, None)
+                if not timer_info:
+                    continue
+
+                task = timer_info.get("task")
+
+                # 更新用户索引
+                user_key = (key[0], key[1])
+                if user_key in self.user_index:
+                    self.user_index[user_key].discard(key)
+                    if not self.user_index[user_key]:
+                        del self.user_index[user_key]
+
+                # 更新群组索引
+                if key[0] in self.chat_index:
+                    self.chat_index[key[0]].discard(key)
+                    if not self.chat_index[key[0]]:
+                        del self.chat_index[key[0]]
+
+                if task and not task.done():
+                    tasks_to_cancel.append((key, task))
+                    if not preserve_message:
+                        cleanup_tasks.append((key, key[0], key[1]))
+
+        # 🚀 无锁执行取消
+        cancelled_count = 0
+
         for key, task in tasks_to_cancel:
-            # 动态注入属性，告知任务在被取消时是否保留消息状态
             if hasattr(task, "preserve_message"):
                 task.preserve_message = preserve_message
 
-            if not task.done():
-                task.cancel()
-                try:
-                    # 等待任务响应取消信号并完成退出
-                    await task
-                    logger.info(f"⏹️ 定时器任务已取消: {key}")
-                except asyncio.CancelledError:
-                    logger.info(f"⏹️ 定时器任务已取消: {key}")
-                except Exception as e:
-                    logger.error(f"❌ 定时器任务取消异常 ({key}): {e}")
-            else:
-                logger.debug(f"定时器任务已完成: {key}")
+            task.cancel()
+            try:
+                await task
+                logger.info(f"⏹️ 定时器任务已取消: {key}")
+            except asyncio.CancelledError:
+                logger.info(f"⏹️ 定时器任务已取消: {key}")
+            except Exception as e:
+                logger.error(f"❌ 任务异常 {key}: {e}")
 
-        # 第 3 步：批量清理数据库中的消息 ID 记录
+            cancelled_count += 1
+
+        # 🧹 清理数据库
         if not preserve_message and cleanup_tasks:
             for key, chat_id, uid in cleanup_tasks:
                 try:
-                    # 调用数据库接口清理 checkin_message_id，防止消息挂起
                     await db.clear_user_checkin_message(chat_id, uid)
                     logger.debug(f"🧹 定时器消息ID已清理: {key}")
                 except Exception as e:
-                    logger.error(f"❌ 定时器消息清理异常 ({key}): {e}")
+                    logger.error(f"❌ 清理失败 {key}: {e}")
 
-        # 第 4 步：记录最终状态日志
-        for key in keys_to_cancel:
-            msg = f"🗑️ 定时器已取消: {key}"
-            if preserve_message:
-                msg += " (保留消息ID)"
-            logger.info(msg)
+        if keys_to_cancel:
+            logger.info(f"✅ 取消定时器 {cancelled_count} 个")
 
         return cancelled_count
 
     async def cancel_all_timers(self):
         """取消所有定时器"""
-        keys = list(self.active_timers.keys())
+        async with self._lock:
+            all_keys = list(self.timers.keys())
+
         cancelled_count = 0
+        for key in all_keys:
+            count = await self.cancel_timer(
+                chat_id=key[0], uid=key[1], shift=key[2], preserve_message=False
+            )
+            cancelled_count += count
 
-        for key in keys:
-            try:
-                await self.cancel_timer(key, preserve_message=False)
-                cancelled_count += 1
-            except Exception as e:
-                logger.error(f"取消定时器 {key} 失败: {e}")
-
-        logger.info(f"已取消所有定时器: {cancelled_count} 个")
+        logger.info(f"✅ 已取消所有定时器: {cancelled_count} 个")
         return cancelled_count
 
     async def cancel_all_timers_for_group(
         self, chat_id: int, preserve_message: bool = False
     ) -> int:
         """取消指定群组的所有定时器"""
-        cancelled_count = 0
-        prefix = f"{chat_id}-"
-
-        keys_to_cancel = [k for k in self.active_timers.keys() if k.startswith(prefix)]
-
-        for key in keys_to_cancel:
-            await self.cancel_timer(key, preserve_message=preserve_message)
-            cancelled_count += 1
-
-        if cancelled_count > 0:
-            msg = f"🗑️ 已取消群组 {chat_id} 的 {cancelled_count} 个定时器"
-            if preserve_message:
-                msg += " (保留消息ID)"
-            logger.info(msg)
-
-        return cancelled_count
+        return await self.cancel_timer(
+            chat_id=chat_id, preserve_message=preserve_message
+        )
 
     async def _activity_timer_wrapper(
         self, chat_id: int, uid: int, act: str, limit: int, shift: str
     ):
         """定时器包装器"""
-        timer_key = f"{chat_id}-{uid}-{shift}"
+        key = (chat_id, uid, shift)
         preserve_message = getattr(asyncio.current_task(), "preserve_message", False)
 
         try:
@@ -758,39 +784,60 @@ class ActivityTimerManager:
 
             await activity_timer(chat_id, uid, act, limit, shift, preserve_message)
         except asyncio.CancelledError:
-            logger.info(f"定时器 {timer_key} 被取消")
-            if preserve_message:
-                logger.debug(f"⏭️ 被取消的定时器保留消息ID")
+            logger.info(f"定时器 {key} 被取消")
         except Exception as e:
-            logger.error(f"定时器异常 {timer_key}: {e}")
+            logger.error(f"定时器异常 {key}: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
         finally:
-            self.active_timers.pop(timer_key, None)
-            logger.debug(f"已清理定时器: {timer_key}")
+            # 确保从索引中移除
+            await self.cancel_timer(
+                chat_id=chat_id, uid=uid, shift=shift, preserve_message=preserve_message
+            )
+            logger.debug(f"✅ 已清理定时器: {key}")
 
     async def cleanup_finished_timers(self):
-        """清理已完成定时器"""
+        """清理已完成定时器（定期维护）"""
         if time.time() - self._last_cleanup < self._cleanup_interval:
             return
 
-        finished_keys = [
-            key
-            for key, task in self.active_timers.items()
-            if task.get("task", None) and task["task"].done()
-        ]
-        for key in finished_keys:
-            self.active_timers.pop(key, None)
+        async with self._lock:
+            # 找出已完成的任务
+            finished_keys = [
+                key
+                for key, info in self.timers.items()
+                if info.get("task") and info["task"].done()
+            ]
+
+            for key in finished_keys:
+                timer_info = self.timers.pop(key, None)
+                if timer_info:
+                    # 清理索引
+                    user_key = (key[0], key[1])
+                    if user_key in self.user_index:
+                        self.user_index[user_key].discard(key)
+                        if not self.user_index[user_key]:
+                            del self.user_index[user_key]
+
+                    if key[0] in self.chat_index:
+                        self.chat_index[key[0]].discard(key)
+                        if not self.chat_index[key[0]]:
+                            del self.chat_index[key[0]]
 
         if finished_keys:
-            logger.info(f"定时器清理: 移除了 {len(finished_keys)} 个已完成定时器")
+            logger.info(f"🧹 定时器清理: 移除了 {len(finished_keys)} 个已完成定时器")
 
         self._last_cleanup = time.time()
 
     def get_stats(self) -> Dict[str, Any]:
         """获取定时器统计"""
-        return {"active_timers": len(self.active_timers)}
+        return {
+            "active_timers": len(self.timers),
+            "user_index_size": len(self.user_index),
+            "chat_index_size": len(self.chat_index),
+            "memory_estimate": f"~{len(self.timers) * 500} bytes",
+        }
 
 
 class EnhancedPerformanceOptimizer:
@@ -1083,12 +1130,61 @@ def rate_limit(rate: int = 1, per: int = 1):
     return decorator
 
 
+def user_rate_limit(rate: int = 2, per: int = 60):
+    """用户级速率限制 - 每个用户独立计数"""
+    user_calls = {}  # {user_id: [call_times]}
+    user_lock = asyncio.Lock()
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(message: types.Message, *args, **kwargs):
+            if not message or not message.from_user:
+                return await func(message, *args, **kwargs)
+
+            user_id = message.from_user.id
+            now = time.time()
+
+            async with user_lock:
+                # 清理该用户过期的调用记录
+                if user_id in user_calls:
+                    user_calls[user_id] = [
+                        t for t in user_calls[user_id] if now - t < per
+                    ]
+                else:
+                    user_calls[user_id] = []
+
+                # 检查是否超过限制
+                if len(user_calls[user_id]) >= rate:
+                    # 计算还需要等待多久
+                    oldest_call = (
+                        min(user_calls[user_id]) if user_calls[user_id] else now
+                    )
+                    wait_seconds = int(per - (now - oldest_call))
+
+                    await message.answer(
+                        f"⏳ 您的操作过于频繁，请 {wait_seconds} 秒后再试",
+                        reply_to_message_id=message.message_id,
+                    )
+                    return
+
+                # 记录这次调用
+                user_calls[user_id].append(now)
+
+            # 执行原函数
+            return await func(message, *args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
 user_lock_manager = UserLockManager()
 timer_manager = ActivityTimerManager()
 performance_optimizer = EnhancedPerformanceOptimizer()
 heartbeat_manager = HeartbeatManager()
 notification_service = NotificationService()
 shift_state_manager = ShiftStateManager()
+timer_manager = ActivityTimerManager()
 
 
 async def send_reset_notification(

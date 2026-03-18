@@ -55,6 +55,7 @@ from utils import (
     calculate_cross_day_time_diff,
     rate_limit,
     send_reset_notification,
+    user_rate_limit,
 )
 
 from fault_tolerance import (
@@ -122,9 +123,9 @@ async def auto_end_current_activity(
     try:
         act = user_data["current_activity"]
         start_time_dt = datetime.fromisoformat(user_data["activity_start_time"])
-        activity_shift = user_data.get("shift", "day")
+        activity_shift = user_data.get("shift", "day")  # 活动的原始班次
 
-        # ===== 新增：获取当前操作的班次 =====
+        # ===== 获取当前操作的班次 =====
         # 从消息中获取当前操作的班次（需要在 process_work_checkin 中设置）
         current_operation_shift = getattr(message, "_current_shift", None)
 
@@ -179,12 +180,17 @@ async def auto_end_current_activity(
             elapsed_time=elapsed,
             fine_amount=0,
             is_overtime=False,
-            shift=activity_shift,
+            shift=activity_shift,  # 使用活动的原始班次
             forced_date=forced_date,
         )
 
-        # 清理定时器
-        await timer_manager.cancel_timer(f"{chat_id}-{uid}", preserve_message=False)
+        # 清理定时器 - 使用活动的原始班次
+        await timer_manager.cancel_timer(
+            chat_id=chat_id,
+            uid=uid,
+            shift=activity_shift,  # ✅ 修复：使用 activity_shift 而不是未定义的 shift
+            preserve_message=False,
+        )
 
         logger.info(
             f"✅ 自动结束活动: {chat_id}-{uid} - {act} "
@@ -1213,7 +1219,10 @@ async def activity_timer(
 
                 await db.clear_user_checkin_message(chat_id, uid)
                 await timer_manager.cancel_timer(
-                    f"{chat_id}-{uid}", preserve_message=False
+                    chat_id=chat_id,
+                    uid=uid,
+                    shift=shift,
+                    preserve_message=False,
                 )
                 break
 
@@ -1721,7 +1730,9 @@ async def _process_back_locked(
             forced_date=business_date,
         )
 
-        await timer_manager.cancel_timer(f"{chat_id}-{uid}", preserve_message=True)
+        await timer_manager.cancel_timer(
+            chat_id=chat_id, uid=uid, preserve_message=True
+        )
 
         # 获取用户总数据
         user_data_task = asyncio.create_task(db.get_user_cached(chat_id, uid))
@@ -3483,7 +3494,8 @@ async def handle_myinfo_night_command(message: types.Message):
         await show_history(message, "night")
 
 
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=30, per=60)
 @track_performance("cmd_ranking")
 async def handle_ranking_command(message: types.Message):
     """处理 /ranking 命令"""
@@ -3603,7 +3615,7 @@ async def cmd_at(message: types.Message):
     await process_back(message)
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=3, per=60)
 @message_deduplicate
 @with_retry("work_start", max_retries=2)
 @track_performance("work_start")
@@ -3612,7 +3624,7 @@ async def cmd_workstart(message: types.Message):
     await process_work_checkin(message, "work_start")
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=3, per=60)
 @message_deduplicate
 @with_retry("work_end", max_retries=2)
 @track_performance("work_end")
@@ -6309,13 +6321,15 @@ async def cmd_worktime(message: types.Message):
         )
 
 
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=100, per=60)
 async def handle_back_command(message: types.Message):
     """处理回座命令"""
     await process_back(message)
 
 
-@rate_limit(rate=5, per=60)
+@user_rate_limit(rate=5, per=60)
+@rate_limit(rate=100, per=60)
 async def handle_work_buttons(message: types.Message):
     """处理上下班按钮"""
     chat_id = message.chat.id
@@ -6484,7 +6498,8 @@ async def handle_back_to_main_menu(message: types.Message):
     logger.info(f"已为用户 {uid} 返回主菜单")
 
 
-@rate_limit(rate=10, per=60)
+@user_rate_limit(rate=10, per=60)
+@rate_limit(rate=100, per=60)
 async def handle_all_text_messages(message: types.Message):
     """统一处理所有文本消息"""
     text = message.text.strip()
@@ -7286,6 +7301,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
 
         try:
             from database import db as database_db
+
             activity_limits = await database_db.get_activity_limits_cached()
             activity_names.update(activity_limits.keys())
         except Exception:
@@ -7300,6 +7316,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             if isinstance(raw_activities, str):
                 try:
                     import json
+
                     raw_activities = json.loads(raw_activities)
                 except Exception:
                     raw_activities = {}
@@ -7332,11 +7349,10 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
                 elif isinstance(act_data, str):
                     try:
                         import json
+
                         parsed = json.loads(act_data)
                         if isinstance(parsed, dict):
-                            count = parsed.get(
-                                "count", parsed.get("activity_count", 0)
-                            )
+                            count = parsed.get("count", parsed.get("activity_count", 0))
                             time_val = parsed.get(
                                 "time", parsed.get("accumulated_time", 0)
                             )
@@ -7364,11 +7380,27 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
             if not formatted_activities:
 
                 exclude_fields = {
-                    "user_id","nickname","shift","statistic_date",
-                    "total_accumulated_time","total_activity_count","total_fines",
-                    "overtime_count","total_overtime_time","work_days","work_hours",
-                    "work_start_count","work_end_count","work_start_fines","work_end_fines",
-                    "late_count","early_count","created_at","updated_at","id","chat_id"
+                    "user_id",
+                    "nickname",
+                    "shift",
+                    "statistic_date",
+                    "total_accumulated_time",
+                    "total_activity_count",
+                    "total_fines",
+                    "overtime_count",
+                    "total_overtime_time",
+                    "work_days",
+                    "work_hours",
+                    "work_start_count",
+                    "work_end_count",
+                    "work_start_fines",
+                    "work_end_fines",
+                    "late_count",
+                    "early_count",
+                    "created_at",
+                    "updated_at",
+                    "id",
+                    "chat_id",
                 }
 
                 for key, value in stat.items():
@@ -7413,9 +7445,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
 
             result.append(user_data)
 
-        logger.info(
-            f"✅ 从月度表成功获取 {target_date} 数据，共 {len(result)} 个用户"
-        )
+        logger.info(f"✅ 从月度表成功获取 {target_date} 数据，共 {len(result)} 个用户")
 
         return result
 
@@ -7423,6 +7453,7 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         logger.error(f"❌ 从月度表获取数据失败: {e}")
         logger.error(traceback.format_exc())
         return []
+
 
 async def export_and_push_csv(
     chat_id: int,
@@ -7433,7 +7464,7 @@ async def export_and_push_csv(
     from_monthly_table: bool = False,
     push_file: bool = True,
 ) -> bool:
-    """导出群组数据为 CSV 并推送（带看门狗保护）"""
+    """导出群组数据为 CSV 并推送（完整版 - 包含所有字段）"""
 
     # ===== 创建本地副本，避免作用域问题 =====
     local_chat_id = chat_id
@@ -7445,9 +7476,8 @@ async def export_and_push_csv(
     local_to_admin_if_no_group = to_admin_if_no_group
 
     # ===== 创建看门狗 =====
-    watchdog = Watchdog(timeout=300, name=f"export_{local_chat_id}")  # 5分钟超时
+    watchdog = Watchdog(timeout=300, name=f"export_{local_chat_id}")
 
-    # ===== 将原有逻辑封装为内部函数，使用本地副本 =====
     async def _export_impl():
         try:
             if not bot_manager or not bot_manager.bot:
@@ -7503,7 +7533,6 @@ async def export_and_push_csv(
             def format_shift_for_export(shift: str) -> str:
                 if not shift:
                     return "白班"
-
                 shift_lower = str(shift).lower()
                 if shift_lower == "day":
                     return "白班"
@@ -7522,12 +7551,10 @@ async def export_and_push_csv(
             day_start_minute = int(day_start_str.split(":")[1])
             day_start_decimal = day_start_hour + day_start_minute / 60
 
-            # 喂狗
             watchdog.feed()
 
-            # ===== 使用 local_target_date 副本，避免修改原始变量 =====
+            # ===== 处理目标日期 =====
             working_target_date = local_target_date
-
             if working_target_date is not None:
                 if hasattr(working_target_date, "date"):
                     working_target_date = working_target_date.date()
@@ -7545,7 +7572,6 @@ async def export_and_push_csv(
 
             if working_target_date is None:
                 business_date = await db.get_business_date(local_chat_id)
-
                 if current_time_decimal < day_start_decimal:
                     export_date = business_date - timedelta(days=1)
                     logger.info(
@@ -7554,17 +7580,15 @@ async def export_and_push_csv(
                 else:
                     export_date = business_date
                     logger.info(f"☀️ [{operation_id}] 正常导出当天数据: {export_date}")
-
                 working_target_date = export_date
             else:
                 logger.info(
                     f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}"
                 )
 
-            # 喂狗
             watchdog.feed()
 
-            # ===== 使用 local_file_name 副本和 working_target_date =====
+            # ===== 生成文件名 =====
             current_file_name = local_file_name
             if not current_file_name:
                 if local_is_daily_reset:
@@ -7580,9 +7604,8 @@ async def export_and_push_csv(
                 f"🔍 [{operation_id}] 获取群组 {local_chat_id} 的统计数据，日期: {working_target_date}"
             )
 
-            # ===== 使用 local_from_monthly_table 副本和 working_target_date =====
+            # ===== 获取数据 =====
             current_from_monthly_table = local_from_monthly_table
-
             if current_from_monthly_table:
                 logger.info(f"📊 [{operation_id}] 尝试从月度表获取数据")
                 try:
@@ -7601,7 +7624,6 @@ async def export_and_push_csv(
                     logger.error(f"❌ [{operation_id}] 从月度表获取数据失败: {e}")
                     current_from_monthly_table = False
 
-            # 喂狗
             watchdog.feed()
 
             if not current_from_monthly_table:
@@ -7640,7 +7662,6 @@ async def export_and_push_csv(
                     activity_limits = Config.DEFAULT_ACTIVITY_LIMITS.copy()
                     group_stats = []
 
-            # 喂狗
             watchdog.feed()
 
             if not group_stats:
@@ -7653,6 +7674,7 @@ async def export_and_push_csv(
                     )
                 return True
 
+            # ===== 数据验证和标准化 =====
             validated_stats = []
             for idx, user_data in enumerate(group_stats):
                 if not isinstance(user_data, dict):
@@ -7660,6 +7682,7 @@ async def export_and_push_csv(
 
                 user_id = user_data.get("user_id", f"unknown_{idx}")
 
+                # 确保所有必要字段存在
                 user_data["work_start_count"] = safe_int(
                     user_data.get("work_start_count", 0)
                 )
@@ -7676,6 +7699,19 @@ async def export_and_push_csv(
                 user_data["early_count"] = safe_int(user_data.get("early_count", 0))
                 user_data["work_days"] = safe_int(user_data.get("work_days", 0))
                 user_data["work_hours"] = safe_int(user_data.get("work_hours", 0))
+                user_data["total_activity_count"] = safe_int(
+                    user_data.get("total_activity_count", 0)
+                )
+                user_data["total_accumulated_time"] = safe_int(
+                    user_data.get("total_accumulated_time", 0)
+                )
+                user_data["total_fines"] = safe_int(user_data.get("total_fines", 0))
+                user_data["overtime_count"] = safe_int(
+                    user_data.get("overtime_count", 0)
+                )
+                user_data["total_overtime_time"] = safe_int(
+                    user_data.get("total_overtime_time", 0)
+                )
 
                 if "activities" not in user_data or not isinstance(
                     user_data["activities"], dict
@@ -7684,33 +7720,151 @@ async def export_and_push_csv(
 
                 validated_stats.append(user_data)
 
-                # 每处理10个用户喂一次狗
                 if idx % 10 == 0:
                     watchdog.feed()
-
-                logger.debug(
-                    f"📊 [{operation_id}] 用户 {user_id} 数据验证完成: "
-                    f"上班={user_data['work_start_count']}, "
-                    f"下班={user_data['work_end_count']}, "
-                    f"工作时长={user_data['work_hours']}秒"
-                )
 
             group_stats = validated_stats
             logger.info(
                 f"📊 [{operation_id}] 数据验证完成，有效数据: {len(group_stats)} 条"
             )
 
-            # 喂狗
             watchdog.feed()
 
+            # ===== 定义所有需要导出的字段 =====
+            # 动态活动（从数据库读取）
+            dynamic_activities = set(activity_limits.keys())
+
+            # 特殊统计字段（固定）
+            special_fields = {
+                "overtime_count",
+                "overtime_time",
+                "total_fines",
+                "work_days",
+                "work_hours",
+                "work_start_count",
+                "work_end_count",
+                "work_start_fines",
+                "work_end_fines",
+                "late_count",
+                "early_count",
+            }
+
+            # 合并所有需要导出的活动/字段
+            all_export_fields = sorted(dynamic_activities | special_fields)
+
+            # ===== 统一的字段映射表 =====
+            field_mapping = {}
+
+            # 动态活动映射
+            for act in dynamic_activities:
+                field_mapping[act] = {
+                    "type": "dynamic",
+                    "count_field": f"{act}_count",
+                    "time_field": f"{act}_time",
+                    "has_count": True,
+                    "has_time": True,
+                }
+
+            # 特殊字段映射
+            field_mapping.update(
+                {
+                    "overtime_count": {
+                        "type": "special",
+                        "count_field": "overtime_count",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                    "overtime_time": {
+                        "type": "special",
+                        "count_field": "overtime_count",
+                        "time_field": "total_overtime_time",
+                        "has_count": False,
+                        "has_time": True,
+                    },
+                    "total_fines": {
+                        "type": "special",
+                        "count_field": None,
+                        "time_field": "total_fines",
+                        "has_count": False,
+                        "has_time": True,
+                    },
+                    "work_days": {
+                        "type": "special",
+                        "count_field": "work_days",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                    "work_hours": {
+                        "type": "special",
+                        "count_field": None,
+                        "time_field": "work_hours",
+                        "has_count": False,
+                        "has_time": True,
+                    },
+                    "work_start_count": {
+                        "type": "special",
+                        "count_field": "work_start_count",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                    "work_end_count": {
+                        "type": "special",
+                        "count_field": "work_end_count",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                    "work_start_fines": {
+                        "type": "special",
+                        "count_field": None,
+                        "time_field": "work_start_fines",
+                        "has_count": False,
+                        "has_time": True,
+                    },
+                    "work_end_fines": {
+                        "type": "special",
+                        "count_field": None,
+                        "time_field": "work_end_fines",
+                        "has_count": False,
+                        "has_time": True,
+                    },
+                    "late_count": {
+                        "type": "special",
+                        "count_field": "late_count",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                    "early_count": {
+                        "type": "special",
+                        "count_field": "early_count",
+                        "time_field": None,
+                        "has_count": True,
+                        "has_time": False,
+                    },
+                }
+            )
+
+            # ===== 生成CSV表头 =====
             csv_buffer = StringIO()
             writer = csv.writer(csv_buffer)
 
             headers = ["用户ID", "用户昵称", "班次"]
 
-            activity_names = sorted(activity_limits.keys())
-            for act in activity_names:
-                headers.extend([f"{act}次数", f"{act}总时长"])
+            for field in all_export_fields:
+                mapping = field_mapping[field]
+                if mapping["has_count"] and mapping["has_time"]:
+                    headers.extend([f"{field}次数", f"{field}总时长"])
+                elif mapping["has_count"]:
+                    headers.append(f"{field}次数")
+                elif mapping["has_time"]:
+                    if field == "total_fines":
+                        headers.append(f"{field}金额")
+                    else:
+                        headers.append(f"{field}时长")
 
             headers.extend(
                 [
@@ -7732,73 +7886,74 @@ async def export_and_push_csv(
 
             writer.writerow(headers)
 
+            # ===== 统计信息 =====
             unique_users = set()
             total_records = 0
-            has_valid_data = False
+            data_from_activities = 0
+            data_from_fields = 0
 
-            for idx, user_data in enumerate(group_stats):
+            # ===== 写入数据行 =====
+            for user_data in group_stats:
                 total_records += 1
-
                 user_id = user_data.get("user_id")
                 if user_id:
                     unique_users.add(str(user_id))
 
-                if any(
-                    [
-                        safe_int(user_data.get("total_activity_count")) > 0,
-                        safe_int(user_data.get("total_accumulated_time")) > 0,
-                        safe_int(user_data.get("total_fines")) > 0,
-                        safe_int(user_data.get("work_start_count")) > 0,
-                        safe_int(user_data.get("work_end_count")) > 0,
-                    ]
-                ):
-                    has_valid_data = True
-
+                # 基础信息
                 row = [
                     user_data.get("user_id", "未知"),
                     user_data.get("nickname", "未知用户"),
                     format_shift_for_export(user_data.get("shift", "day")),
                 ]
 
-                # 从 daily_statistics 或 user_activities 获取活动数据
                 activities = user_data.get("activities", {})
 
-                # 调试日志：查看 activities 的结构
-                logger.debug(
-                    f"用户 {user_data.get('user_id')} activities 结构: {activities}"
-                )
+                # 处理每个字段
+                for field in all_export_fields:
+                    mapping = field_mapping[field]
 
-                for act in activity_names:
-                    # 尝试多种方式获取活动数据
-                    activity_info = activities.get(act, {})
+                    if mapping["type"] == "dynamic":
+                        # 动态活动：优先从 activities 读取
+                        activity_info = activities.get(field)
+                        if activity_info:
+                            count = safe_int(activity_info.get("count", 0))
+                            time_seconds = safe_int(activity_info.get("time", 0))
+                            data_from_activities += 1
+                        else:
+                            count = 0
+                            time_seconds = 0
 
-                    # 如果 activity_info 不是字典，尝试其他格式
-                    if not isinstance(activity_info, dict):
-                        logger.warning(f"活动 {act} 数据格式异常: {activity_info}")
-                        count = 0
-                        time_seconds = 0
-                    else:
-                        # 检查可能的字段名
-                        count = safe_int(
-                            activity_info.get("count")
-                            or activity_info.get("activity_count")
-                            or 0
+                        if mapping["has_count"]:
+                            row.append(count)
+                        if mapping["has_time"]:
+                            row.append(safe_format_time(time_seconds))
+
+                    else:  # special
+                        # 特殊字段：从 user_data 读取
+                        count_field = mapping.get("count_field")
+                        time_field = mapping.get("time_field")
+
+                        count = (
+                            safe_int(user_data.get(count_field, 0))
+                            if count_field
+                            else 0
                         )
-                        time_seconds = safe_int(
-                            activity_info.get("time")
-                            or activity_info.get("accumulated_time")
-                            or 0
-                        )
-
-                    row.append(count)
-                    row.append(safe_format_time(time_seconds))
-
-                    # 调试日志
-                    if count > 0 or time_seconds > 0:
-                        logger.debug(
-                            f"用户 {user_data.get('user_id')} {act}: 次数={count}, 时长={time_seconds}秒"
+                        time_seconds = (
+                            safe_int(user_data.get(time_field, 0)) if time_field else 0
                         )
 
+                        if count > 0 or time_seconds > 0:
+                            data_from_fields += 1
+
+                        if mapping["has_count"]:
+                            row.append(count)
+                        if mapping["has_time"]:
+                            if field == "total_fines":
+                                row.append(time_seconds)
+                            else:
+                                row.append(safe_format_time(time_seconds))
+
+                # 添加汇总字段
                 row.extend(
                     [
                         safe_int(user_data.get("total_activity_count", 0)),
@@ -7823,14 +7978,16 @@ async def export_and_push_csv(
 
                 writer.writerow(row)
 
-                # 每写入100行喂一次狗
-                if idx % 100 == 0:
-                    watchdog.feed()
-
-            # 喂狗
             watchdog.feed()
 
-            if not has_valid_data and total_records == 0:
+            # 记录数据来源统计
+            logger.info(
+                f"📊 [{operation_id}] 数据来源统计: "
+                f"来自activities={data_from_activities}, "
+                f"来自字段补全={data_from_fields}"
+            )
+
+            if total_records == 0:
                 logger.warning(
                     f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有有效数据需要导出"
                 )
@@ -7840,6 +7997,7 @@ async def export_and_push_csv(
                     )
                 return True
 
+            # ===== 写入文件 =====
             csv_content = csv_buffer.getvalue()
             csv_buffer.close()
 
@@ -7874,7 +8032,6 @@ async def export_and_push_csv(
                 write_file_async(), get_chat_title_async()
             )
 
-            # 喂狗
             watchdog.feed()
 
             if not write_result:
@@ -7883,6 +8040,7 @@ async def export_and_push_csv(
                 )
                 return False
 
+            # ===== 发送文件 =====
             display_date = working_target_date.strftime("%Y年%m月%d日")
             dashed_line = getattr(
                 MessageFormatter, "create_dashed_line", lambda: "─" * 30
@@ -7894,13 +8052,15 @@ async def export_and_push_csv(
                 f"📅 统计日期：<code>{display_date}</code>\n"
                 f"⏰ 导出时间：<code>{beijing_now.strftime('%Y-%m-%d %H:%M:%S')}</code>\n"
                 f"{dashed_line}\n"
-                f"💾 包含完整的工作记录统计（上班迟到/下班早退）"
+                f"💾 包含完整的工作记录统计（上班迟到/下班早退）\n"
+                f"📈 总记录数: {total_records} 条\n"
+                f"👥 总用户数: {len(unique_users)} 人\n"
+                f"📊 数据来源: activities={data_from_activities}, 字段补全={data_from_fields}"
             )
 
             input_file = FSInputFile(temp_file, filename=current_file_name)
             send_to_group_success = False
 
-            # ===== 根据 push_file 参数决定是否发送 =====
             if local_push_file:
                 try:
                     success = await bot_manager.send_document_with_retry(
@@ -7918,13 +8078,13 @@ async def export_and_push_csv(
                         logger.error(f"❌ [{operation_id}] bot_manager 发送文档失败")
                 except Exception as e:
                     logger.error(f"❌ [{operation_id}] 发送到群组失败: {e}")
-                    if not local_is_daily_reset:  # 只在非自动重置时提示用户
+                    if not local_is_daily_reset:
                         await bot_manager.send_message_with_retry(
                             local_chat_id, f"❌ 数据导出失败: {str(e)[:100]}"
                         )
             else:
                 logger.debug(f"⏭️ [{operation_id}] push_file=False，跳过文件发送")
-                send_to_group_success = True  # 不推送也视为成功
+                send_to_group_success = True
 
             if local_to_admin_if_no_group and notification_service:
                 try:
@@ -7934,6 +8094,7 @@ async def export_and_push_csv(
                 except Exception as e:
                     logger.warning(f"⚠️ [{operation_id}] 推送到通知服务失败: {e}")
 
+            # 清理临时文件
             async def cleanup_background():
                 await asyncio.sleep(2)
                 if temp_file and os.path.exists(temp_file):
@@ -7946,6 +8107,7 @@ async def export_and_push_csv(
                 f"✅ [{operation_id}] 数据导出完成\n"
                 f"   文件: {current_file_name}\n"
                 f"   用户数: {len(unique_users)}, 数据行: {total_records}\n"
+                f"   数据来源: activities={data_from_activities}, 字段补全={data_from_fields}\n"
                 f"   耗时: {duration:.2f}秒"
             )
 
@@ -7970,7 +8132,6 @@ async def export_and_push_csv(
 
             return False
 
-    # ===== 使用看门狗运行 =====
     try:
         return await watchdog.run(_export_impl())
     except asyncio.CancelledError:
@@ -8374,6 +8535,8 @@ async def initialize_services():
         # 确保数据库完全就绪
         max_wait = 30
         waited = 0
+        initialization_success = False
+
         while waited < max_wait:
             if db._initialized and db.pool:
                 try:
@@ -8381,13 +8544,25 @@ async def initialize_services():
                     async with db.pool.acquire() as test_conn:
                         await test_conn.fetchval("SELECT 1")
                     logger.info(f"✅ 数据库连接测试通过 (等待 {waited}s)")
+                    initialization_success = True
                     break
                 except Exception as e:
                     logger.warning(f"数据库连接测试失败: {e}")
+                    # ✅ 关键修复：标记为未初始化
+                    db._initialized = False
+                    # ✅ 尝试重新连接
+                    try:
+                        await db._reconnect()
+                        logger.info("🔄 数据库重新连接成功")
+                    except Exception as reconnect_error:
+                        logger.error(f"❌ 数据库重新连接失败: {reconnect_error}")
 
             logger.debug(f"⏳ 等待数据库完全初始化... ({waited}s)")
             await asyncio.sleep(1)
             waited += 1
+
+        if not initialization_success:
+            raise RuntimeError("数据库初始化失败 - 无法建立稳定连接")
 
         if waited >= max_wait:
             raise RuntimeError("数据库初始化超时")
