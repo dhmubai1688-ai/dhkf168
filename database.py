@@ -743,7 +743,7 @@ class PostgreSQLDatabase:
         """创建所有必要的表（纯双班模式，移除软重置相关字段）"""
         async with self.pool.acquire() as conn:
             tables = [
-                # 1. groups表 - 移除软重置相关字段
+                # 1. groups表
                 """
                 CREATE TABLE IF NOT EXISTS groups (
                     chat_id BIGINT PRIMARY KEY,
@@ -885,7 +885,7 @@ class PostgreSQLDatabase:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(chat_id, user_id, statistic_date, shift) 
                 )
-                """
+                """,
                 # 10. activity_user_limits表
                 """
                 CREATE TABLE IF NOT EXISTS activity_user_limits (
@@ -895,7 +895,7 @@ class PostgreSQLDatabase:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
-                # 11. daily_statistics表 - 移除软重置相关字段
+                # 11. daily_statistics表
                 """
                 CREATE TABLE IF NOT EXISTS daily_statistics(
                     id SERIAL PRIMARY KEY,
@@ -903,26 +903,22 @@ class PostgreSQLDatabase:
                     user_id BIGINT,
                     record_date DATE,
                     shift TEXT DEFAULT 'day',
-                    -- 普通活动统计
-                    activity_count INTEGER DEFAULT 0,        -- 总活动次数
-                    accumulated_time INTEGER DEFAULT 0,       -- 总活动时长
-                    -- 罚款统计
-                    fine_amount INTEGER DEFAULT 0,            -- 总罚款金额
-                    -- 超时统计
-                    overtime_count INTEGER DEFAULT 0,         -- 超时次数
-                    overtime_time INTEGER DEFAULT 0,          -- 超时时长
-                    -- 工作统计
-                    work_days INTEGER DEFAULT 0,              -- 工作天数
-                    work_hours INTEGER DEFAULT 0,              -- 工作时长
-                    work_start_count INTEGER DEFAULT 0,        -- 上班次数
-                    work_end_count INTEGER DEFAULT 0,          -- 下班次数
-                    work_start_fines INTEGER DEFAULT 0,        -- 上班罚款
-                    work_end_fines INTEGER DEFAULT 0,          -- 下班罚款
-                    late_count INTEGER DEFAULT 0,              -- 迟到次数
-                    early_count INTEGER DEFAULT 0,              -- 早退次数
+                    activity_count INTEGER DEFAULT 0,
+                    accumulated_time INTEGER DEFAULT 0,
+                    fine_amount INTEGER DEFAULT 0,
+                    overtime_count INTEGER DEFAULT 0,
+                    overtime_time INTEGER DEFAULT 0,
+                    work_days INTEGER DEFAULT 0,
+                    work_hours INTEGER DEFAULT 0,
+                    work_start_count INTEGER DEFAULT 0,
+                    work_end_count INTEGER DEFAULT 0,
+                    work_start_fines INTEGER DEFAULT 0,
+                    work_end_fines INTEGER DEFAULT 0,
+                    late_count INTEGER DEFAULT 0,
+                    early_count INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(chat_id, user_id, record_date, shift)  -- 移除了 activity_name
+                    UNIQUE(chat_id, user_id, record_date, shift)
                 )
                 """,
                 # 12. group_shift_state表
@@ -938,6 +934,7 @@ class PostgreSQLDatabase:
                     PRIMARY KEY (chat_id, user_id, shift)
                 )
                 """,
+                # 13. shift_handover_configs表
                 """
                 CREATE TABLE IF NOT EXISTS shift_handover_configs (
                     chat_id BIGINT PRIMARY KEY,
@@ -954,6 +951,7 @@ class PostgreSQLDatabase:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """,
+                # 14. user_handover_cycles表
                 """
                 CREATE TABLE IF NOT EXISTS user_handover_cycles (
                     id SERIAL PRIMARY KEY,
@@ -969,6 +967,7 @@ class PostgreSQLDatabase:
                     UNIQUE(chat_id, user_id, handover_date, shift_type, cycle_number)
                 )
                 """,
+                # 15. reset_logs表
                 """
                 CREATE TABLE IF NOT EXISTS reset_logs (
                     id SERIAL PRIMARY KEY,
