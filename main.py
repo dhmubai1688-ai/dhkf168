@@ -7752,6 +7752,27 @@ async def export_and_push_csv(
             # 合并所有需要导出的活动/字段
             all_export_fields = sorted(dynamic_activities | special_fields)
 
+            # ===== 字段名中文映射 =====
+            field_name_map = {
+                # 活动字段
+                "吃饭": "吃饭",
+                "大厕": "大厕",
+                "小厕": "小厕",
+                "抽烟或休息": "抽烟或休息",
+                # 统计字段
+                "overtime_count": "超时次数",
+                "overtime_time": "超时时长",
+                "total_fines": "罚款总金额",
+                "work_days": "工作天数",
+                "work_hours": "工作时长",
+                "work_start_count": "上班次数",
+                "work_end_count": "下班次数",
+                "work_start_fines": "上班罚款",
+                "work_end_fines": "下班罚款",
+                "late_count": "迟到次数",
+                "early_count": "早退次数",
+            }
+
             # ===== 统一的字段映射表 =====
             field_mapping = {}
 
@@ -7848,7 +7869,7 @@ async def export_and_push_csv(
                 }
             )
 
-            # ===== 生成CSV表头 =====
+            # ===== 生成CSV表头（中文版，包含总计字段）=====
             csv_buffer = StringIO()
             writer = csv.writer(csv_buffer)
 
@@ -7856,33 +7877,21 @@ async def export_and_push_csv(
 
             for field in all_export_fields:
                 mapping = field_mapping[field]
+                # 获取中文名称，如果没有映射则使用原字段名
+                display_name = field_name_map.get(field, field)
+
                 if mapping["has_count"] and mapping["has_time"]:
-                    headers.extend([f"{field}次数", f"{field}总时长"])
+                    headers.extend([f"{display_name}次数", f"{display_name}总时长"])
                 elif mapping["has_count"]:
-                    headers.append(f"{field}次数")
+                    headers.append(f"{display_name}次数")
                 elif mapping["has_time"]:
                     if field == "total_fines":
-                        headers.append(f"{field}金额")
+                        headers.append(f"{display_name}")  # 罚款总金额不加"时长"
                     else:
-                        headers.append(f"{field}时长")
+                        headers.append(f"{display_name}")
 
-            headers.extend(
-                [
-                    "活动次数总计",
-                    "活动用时总计",
-                    "罚款总金额",
-                    "超时次数",
-                    "总超时时间",
-                    "工作天数",
-                    "工作时长",
-                    "上班次数",
-                    "下班次数",
-                    "上班罚款",
-                    "下班罚款",
-                    "迟到次数",
-                    "早退次数",
-                ]
-            )
+            # 添加总计字段（这些不在 special_fields 中，需要单独添加）
+            headers.extend(["活动次数总计", "活动用时总计"])
 
             writer.writerow(headers)
 
@@ -7953,26 +7962,13 @@ async def export_and_push_csv(
                             else:
                                 row.append(safe_format_time(time_seconds))
 
-                # 添加汇总字段
+                # 添加总计字段数据
                 row.extend(
                     [
                         safe_int(user_data.get("total_activity_count", 0)),
                         safe_format_time(
                             safe_int(user_data.get("total_accumulated_time", 0))
                         ),
-                        safe_int(user_data.get("total_fines", 0)),
-                        safe_int(user_data.get("overtime_count", 0)),
-                        safe_format_time(
-                            safe_int(user_data.get("total_overtime_time", 0))
-                        ),
-                        safe_int(user_data.get("work_days", 0)),
-                        safe_format_time(safe_int(user_data.get("work_hours", 0))),
-                        safe_int(user_data.get("work_start_count", 0)),
-                        safe_int(user_data.get("work_end_count", 0)),
-                        safe_int(user_data.get("work_start_fines", 0)),
-                        safe_int(user_data.get("work_end_fines", 0)),
-                        safe_int(user_data.get("late_count", 0)),
-                        safe_int(user_data.get("early_count", 0)),
                     ]
                 )
 
