@@ -3494,7 +3494,7 @@ class PostgreSQLDatabase:
                 async with self.pool.acquire() as conn:
                     t0 = time.time()
 
-                    # 执行聚合查询
+                    # ✅ 修复：修正 GROUP BY 子句
                     rows = await conn.fetch(
                         """
                         WITH stats AS (
@@ -3533,7 +3533,11 @@ class PostgreSQLDatabase:
                                 AND ua.activity_date = $1 
                                 AND ua.shift = ds.shift
                             WHERE u.chat_id = $2
-                            GROUP BY u.user_id, u.nickname, ds.shift
+                            GROUP BY u.user_id, u.nickname, ds.shift, 
+                                     ds.activity_count, ds.accumulated_time, ds.fine_amount,
+                                     ds.overtime_count, ds.overtime_time, ds.work_days, ds.work_hours,
+                                     ds.work_start_count, ds.work_end_count, ds.work_start_fines,
+                                     ds.work_end_fines, ds.late_count, ds.early_count
                         )
                         SELECT * FROM stats
                         ORDER BY user_id, shift
@@ -3623,6 +3627,7 @@ class PostgreSQLDatabase:
         except Exception as e:
             logger.error(f"❌ 获取群统计失败 chat={chat_id}: {e}", exc_info=True)
             return []
+
 
     async def get_all_groups(self) -> List[int]:
         """获取所有群组ID"""
