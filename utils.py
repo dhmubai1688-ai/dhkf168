@@ -195,6 +195,47 @@ class MessageFormatter:
         return "".join(parts)
 
 
+async def calculate_fine(activity: str, overtime_minutes: float) -> int:
+    """计算罚款金额"""
+    fine_rates = await db.get_fine_rates_for_activity(activity)
+    if not fine_rates:
+        return 0
+
+    segments = []
+    for time_key in fine_rates.keys():
+        try:
+            if isinstance(time_key, str) and "min" in time_key.lower():
+                time_value = int(time_key.lower().replace("min", "").strip())
+            else:
+                time_value = int(time_key)
+            segments.append(time_value)
+        except (ValueError, TypeError):
+            continue
+
+    if not segments:
+        return 0
+
+    segments.sort()
+
+    applicable_fine = 0
+    for segment in segments:
+        if overtime_minutes <= segment:
+            original_key = str(segment)
+            if original_key not in fine_rates:
+                original_key = f"{segment}min"
+            applicable_fine = fine_rates.get(original_key, 0)
+            break
+
+    if applicable_fine == 0 and segments:
+        max_segment = segments[-1]
+        original_key = str(max_segment)
+        if original_key not in fine_rates:
+            original_key = f"{max_segment}min"
+        applicable_fine = fine_rates.get(original_key, 0)
+
+    return applicable_fine
+
+
 class NotificationService:
     """统一推送服务"""
 
