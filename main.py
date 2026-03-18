@@ -2328,60 +2328,53 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                     is_late_early = True
                     emoji_status = "😅"
 
+                # ===== 上班打卡 - 使用新的 add_work_record 方法 =====
                 db_write_success = False
                 for attempt in range(3):
                     try:
-                        async with db.pool.acquire() as conn:
-                            async with conn.transaction():
-                                await conn.execute(
-                                    """
-                                    INSERT INTO work_records
-                                    (chat_id, user_id, record_date, checkin_type,
-                                     checkin_time, status, time_diff_minutes,
-                                     fine_amount, shift, shift_detail)
-                                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                                    """,
-                                    chat_id,
-                                    uid,
-                                    record_date,
-                                    "work_start",
-                                    current_time,
-                                    status,
-                                    time_diff_minutes,
-                                    fine_amount,
-                                    shift,
-                                    shift_detail,
-                                )
+                        # ✅ 1. 使用新的 add_work_record 方法（会自动处理 work_records + daily_statistics + monthly_statistics）
+                        await db.add_work_record(
+                            chat_id=chat_id,
+                            user_id=uid,
+                            record_date=record_date,  # 使用班次判定得到的 record_date
+                            checkin_type="work_start",
+                            checkin_time=current_time,
+                            status=status,
+                            time_diff_minutes=time_diff_minutes,
+                            fine_amount=fine_amount,
+                            shift=shift,
+                            shift_detail=shift_detail,
+                        )
 
-                                success = await db.set_user_shift_state(
-                                    chat_id=chat_id,
-                                    user_id=uid,
-                                    shift=shift,
-                                    record_date=record_date,
-                                )
+                        # ✅ 2. 仍然需要设置用户班次状态（这个单独处理）
+                        success = await db.set_user_shift_state(
+                            chat_id=chat_id,
+                            user_id=uid,
+                            shift=shift,
+                            record_date=record_date,
+                        )
 
-                                if success:
-                                    shift_text_display = (
-                                        "白班" if shift == "day" else "夜班"
-                                    )
-                                    logger.info(
-                                        f"🏁 [{trace_id}] 用户班次状态设置成功: {shift_text_display}, 用户={uid}"
-                                    )
+                        if success:
+                            shift_text_display = "白班" if shift == "day" else "夜班"
+                            logger.info(
+                                f"🏁 [{trace_id}] 用户班次状态设置成功: {shift_text_display}, 用户={uid}"
+                            )
 
                         db_write_success = True
                         break
 
                     except Exception as e:
                         logger.error(
-                            f"[{trace_id}] ❌ 数据库写入失败 (尝试 {attempt + 1}/3): {e}"
+                            f"[{trace_id}] ❌ 上班打卡失败 (尝试 {attempt + 1}/3): {e}"
                         )
-                        if attempt == 2:
+                        if attempt == 2:  # 最后一次尝试失败
                             await message.answer("❌ 系统繁忙，请稍后重试")
                             return
-                        await asyncio.sleep(1 * (2**attempt))
+                        await asyncio.sleep(1 * (2**attempt))  # 指数退避：1, 2, 4秒
 
                 if not db_write_success:
                     return
+                # ===== 替换结束 =====
 
                 result_msg = (
                     f"{emoji_status} <b>{shift_text}{action_text}完成</b>\n"
@@ -2609,95 +2602,88 @@ async def process_work_checkin(message: types.Message, checkin_type: str):
                             )
                     # ===== 结束检查 =====
 
+                # ===== 下班打卡 - 使用新的 add_work_record 方法 =====
                 db_write_success = False
                 for attempt in range(3):
                     try:
-                        async with db.pool.acquire() as conn:
-                            async with conn.transaction():
-                                await conn.execute(
+                        # ✅ 1. 使用新的 add_work_record 方法（自动处理 work_records + daily_statistics + monthly_statistics）
+                        await db.add_work_record(
+                            chat_id=chat_id,
+                            user_id=uid,
+                            record_date=final_record_date,
+                            checkin_type="work_end",
+                            checkin_time=current_time,
+                            status=status,
+                            time_diff_minutes=time_diff_minutes,
+                            fine_amount=fine_amount,
+                            shift=shift,
+                            shift_detail=shift_detail,
+                        )
+
+                        # ✅ 2. 清除用户班次状态（这个单独处理）
+                        success = await db.clear_user_shift_state(
+                            chat_id=chat_id,
+                            user_id=uid,
+                            shift=shift,
+                        )
+
+                        shift_text_display = "白班" if shift == "day" else "夜班"
+
+                        if success:
+                            logger.info(
+                                f"🏁 [{trace_id}] 用户班次状态清除成功: {shift_text_display}, 用户={uid}"
+                            )
+
+                            # ✅ 3. 检查是否还有其他人在这个班次
+                            async with db.pool.acquire() as check_conn:
+                                other_users = await check_conn.fetchval(
                                     """
-                                    INSERT INTO work_records
-                                    (chat_id, user_id, record_date, checkin_type,
-                                     checkin_time, status, time_diff_minutes,
-                                     fine_amount, shift, shift_detail)
-                                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                                    SELECT COUNT(*) FROM group_shift_state
+                                    WHERE chat_id = $1 AND shift = $2
                                     """,
                                     chat_id,
-                                    uid,
-                                    final_record_date,
-                                    "work_end",
-                                    current_time,
-                                    status,
-                                    time_diff_minutes,
-                                    fine_amount,
                                     shift,
-                                    shift_detail,
                                 )
 
-                                success = await db.clear_user_shift_state(
-                                    chat_id=chat_id,
-                                    user_id=uid,
-                                    shift=shift,
-                                )
+                                if other_users == 0:
+                                    # 定义发送通知的函数
+                                    async def send_end_notification():
+                                        try:
+                                            await message.answer(
+                                                f"📢 <b>{shift_text_display}班次结束</b> 所有用户已完成下班打卡",
+                                                parse_mode="HTML",
+                                            )
+                                        except Exception as e:
+                                            logger.error(f"发送班次结束通知失败: {e}")
 
-                                shift_text_display = (
-                                    "白班" if shift == "day" else "夜班"
-                                )
-
-                                if success:
+                                    asyncio.create_task(send_end_notification())
                                     logger.info(
-                                        f"🏁 [{trace_id}] 用户班次状态清除成功: {shift_text_display}, 用户={uid}"
+                                        f"🏁 [{trace_id}] {shift_text_display}班次所有用户已下班"
                                     )
-
-                                    other_users = await conn.fetchval(
-                                        """
-                                        SELECT COUNT(*) FROM group_shift_state
-                                        WHERE chat_id = $1 AND shift = $2
-                                        """,
-                                        chat_id,
-                                        shift,
-                                    )
-
-                                    if other_users == 0:
-
-                                        async def send_end_notification():
-                                            try:
-                                                await message.answer(
-                                                    f"📢 <b>{shift_text_display}班次结束</b> 所有用户已完成下班打卡",
-                                                    parse_mode="HTML",
-                                                )
-                                            except Exception as e:
-                                                logger.error(
-                                                    f"发送班次结束通知失败: {e}"
-                                                )
-
-                                        asyncio.create_task(send_end_notification())
-                                        logger.info(
-                                            f"🏁 [{trace_id}] {shift_text_display}班次所有用户已下班"
-                                        )
-                                    else:
-                                        logger.info(
-                                            f"ℹ️ [{trace_id}] 仍有 {other_users} 人在{shift_text_display}班次工作中"
-                                        )
                                 else:
-                                    logger.warning(
-                                        f"⚠️ [{trace_id}] 用户班次状态清除失败: {shift_text_display}, 用户={uid}"
+                                    logger.info(
+                                        f"ℹ️ [{trace_id}] 仍有 {other_users} 人在{shift_text_display}班次工作中"
                                     )
+                        else:
+                            logger.warning(
+                                f"⚠️ [{trace_id}] 用户班次状态清除失败: {shift_text_display}, 用户={uid}"
+                            )
 
                         db_write_success = True
                         break
 
                     except Exception as e:
                         logger.error(
-                            f"[{trace_id}] ❌ 数据库写入失败 (尝试 {attempt + 1}/3): {e}"
+                            f"[{trace_id}] ❌ 下班打卡失败 (尝试 {attempt + 1}/3): {e}"
                         )
-                        if attempt == 2:
+                        if attempt == 2:  # 最后一次尝试失败
                             await message.answer("❌ 系统繁忙，请稍后重试")
                             return
-                        await asyncio.sleep(1 * (2**attempt))
+                        await asyncio.sleep(1 * (2**attempt))  # 指数退避：1, 2, 4秒
 
                 if not db_write_success:
                     return
+                # ===== 替换结束 =====
 
                 result_msg = (
                     f"{emoji_status} <b>{shift_text}{action_text}完成</b>\n"
