@@ -2819,10 +2819,18 @@ class PostgreSQLDatabase:
         max_retries: int = 3,
         statement_timeout: int = 10000,
     ):
-        """企业级绝对一致版 - 统计表与 work_records 完全一致"""
+        """
+        修复版：企业级绝对一致版 - 统计表与 work_records 完全一致
 
-        # ===== 1. 统一业务日期 =====
-        business_date = await self.get_business_date(chat_id)
+        重要修复：
+        1. ✅ 使用传入的 record_date 而不是自动获取的 business_date
+        2. ✅ 确保夜班下班记录统计在正确的日期
+        3. ✅ 罚款正确分配到 work_start_fines/work_end_fines
+        4. ✅ 月度统计正确更新
+        """
+        # ===== 1. 使用传入的 record_date =====
+        # business_date = await self.get_business_date(chat_id)  # ❌ 错误：应该用传入的
+        business_date = record_date  # ✅ 修复：使用传入的日期
         statistic_date = business_date.replace(day=1)
         now = self.get_beijing_time()
 
@@ -2872,7 +2880,7 @@ class PostgreSQLDatabase:
                             """,
                             chat_id,
                             user_id,
-                            business_date,
+                            business_date,  # 使用传入的 record_date
                             checkin_type,
                             checkin_time,
                             status,
@@ -2888,31 +2896,36 @@ class PostgreSQLDatabase:
                             SELECT 
                                 COUNT(*) FILTER (WHERE checkin_type='work_start') AS work_start_count,
                                 COUNT(*) FILTER (WHERE checkin_type='work_end') AS work_end_count,
-                                SUM(CASE WHEN checkin_type='work_start' AND time_diff_minutes>0 THEN 1 ELSE 0 END) AS late_count,
-                                SUM(CASE WHEN checkin_type='work_end' AND time_diff_minutes<0 THEN 1 ELSE 0 END) AS early_count,
-                                SUM(CASE WHEN checkin_type='work_start' THEN fine_amount ELSE 0 END) AS work_start_fines,
-                                SUM(CASE WHEN checkin_type='work_end' THEN fine_amount ELSE 0 END) AS work_end_fines,
-                                SUM(
-                                    CASE 
-                                        WHEN checkin_type='work_start' THEN 0
-                                        WHEN checkin_type='work_end' THEN
-                                            EXTRACT(EPOCH FROM (
-                                                TO_TIMESTAMP(checkin_time, 'HH24:MI') - 
-                                                TO_TIMESTAMP((
-                                                    SELECT checkin_time 
-                                                    FROM work_records ws
-                                                    WHERE ws.chat_id=work_records.chat_id
-                                                      AND ws.user_id=work_records.user_id
-                                                      AND ws.record_date=work_records.record_date
-                                                      AND ws.shift=work_records.shift
-                                                      AND ws.checkin_type='work_start'
-                                                    LIMIT 1
-                                                ), 'HH24:MI')
-                                            ))
-                                    END
+                                COUNT(CASE WHEN checkin_type='work_start' AND time_diff_minutes>0 THEN 1 END) AS late_count,
+                                COUNT(CASE WHEN checkin_type='work_end' AND time_diff_minutes<0 THEN 1 END) AS early_count,
+                                COALESCE(SUM(CASE WHEN checkin_type='work_start' THEN fine_amount ELSE 0 END), 0) AS work_start_fines,
+                                COALESCE(SUM(CASE WHEN checkin_type='work_end' THEN fine_amount ELSE 0 END), 0) AS work_end_fines,
+                                COALESCE(
+                                    SUM(
+                                        CASE 
+                                            WHEN checkin_type='work_start' THEN 0
+                                            WHEN checkin_type='work_end' THEN
+                                                EXTRACT(EPOCH FROM (
+                                                    TO_TIMESTAMP(checkin_time, 'HH24:MI') - 
+                                                    TO_TIMESTAMP((
+                                                        SELECT COALESCE(checkin_time, '00:00')
+                                                        FROM work_records ws
+                                                        WHERE ws.chat_id = work_records.chat_id
+                                                          AND ws.user_id = work_records.user_id
+                                                          AND ws.record_date = work_records.record_date
+                                                          AND ws.shift = work_records.shift
+                                                          AND ws.checkin_type = 'work_start'
+                                                        LIMIT 1
+                                                    ), 'HH24:MI')
+                                                ))
+                                        END
+                                    ), 0
                                 ) AS work_seconds
                             FROM work_records
-                            WHERE chat_id=$1 AND user_id=$2 AND record_date=$3 AND shift=$4
+                            WHERE chat_id = $1 
+                              AND user_id = $2 
+                              AND record_date = $3 
+                              AND shift = $4
                             """,
                             chat_id,
                             user_id,
@@ -2920,14 +2933,17 @@ class PostgreSQLDatabase:
                             shift,
                         )
 
-                        # 插入或更新 daily_statistics
+                        # ===== 5. 插入或更新 daily_statistics =====
                         await conn.execute(
                             """
-                            INSERT INTO daily_statistics (chat_id, user_id, record_date, shift,
-                                work_start_count, work_end_count, late_count, early_count,
-                                work_start_fines, work_end_fines, work_hours, work_days, updated_at)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CURRENT_TIMESTAMP)
-                            ON CONFLICT (chat_id, user_id, record_date, shift)
+                            INSERT INTO daily_statistics 
+                            (chat_id, user_id, record_date, shift,
+                             work_start_count, work_end_count, late_count, early_count,
+                             work_start_fines, work_end_fines, work_hours, work_days, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 
+                                    CASE WHEN $5 > 0 OR $6 > 0 OR $11 > 0 THEN 1 ELSE 0 END,
+                                    CURRENT_TIMESTAMP)
+                            ON CONFLICT (chat_id, user_id, record_date, shift) 
                             DO UPDATE SET
                                 work_start_count = EXCLUDED.work_start_count,
                                 work_end_count = EXCLUDED.work_end_count,
@@ -2936,7 +2952,13 @@ class PostgreSQLDatabase:
                                 work_start_fines = EXCLUDED.work_start_fines,
                                 work_end_fines = EXCLUDED.work_end_fines,
                                 work_hours = EXCLUDED.work_hours,
-                                work_days = EXCLUDED.work_days,
+                                work_days = CASE 
+                                    WHEN EXCLUDED.work_hours > 0 AND daily_statistics.work_hours = 0 
+                                    THEN daily_statistics.work_days + 1
+                                    WHEN EXCLUDED.work_hours = 0 AND daily_statistics.work_hours > 0
+                                    THEN daily_statistics.work_days
+                                    ELSE daily_statistics.work_days
+                                END,
                                 updated_at = CURRENT_TIMESTAMP
                             """,
                             chat_id,
@@ -2950,25 +2972,62 @@ class PostgreSQLDatabase:
                             daily_row["work_start_fines"],
                             daily_row["work_end_fines"],
                             int(daily_row["work_seconds"] or 0),
-                            1 if daily_row["work_seconds"] else 0,
                         )
 
-                        # ===== 5. 重新计算当月统计 =====
+                        # ===== 6. 更新月度统计（按罚款类型分开）=====
+                        if fine_amount > 0:
+                            if checkin_type == "work_start":
+                                # 上班罚款
+                                await conn.execute(
+                                    """
+                                    INSERT INTO monthly_statistics 
+                                    (chat_id, user_id, statistic_date, shift, work_start_fines, updated_at)
+                                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                                    ON CONFLICT (chat_id, user_id, statistic_date, shift)
+                                    DO UPDATE SET
+                                        work_start_fines = monthly_statistics.work_start_fines + $5,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    chat_id,
+                                    user_id,
+                                    statistic_date,
+                                    shift,
+                                    fine_amount,
+                                )
+                            else:  # work_end
+                                # 下班罚款
+                                await conn.execute(
+                                    """
+                                    INSERT INTO monthly_statistics 
+                                    (chat_id, user_id, statistic_date, shift, work_end_fines, updated_at)
+                                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                                    ON CONFLICT (chat_id, user_id, statistic_date, shift)
+                                    DO UPDATE SET
+                                        work_end_fines = monthly_statistics.work_end_fines + $5,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    """,
+                                    chat_id,
+                                    user_id,
+                                    statistic_date,
+                                    shift,
+                                    fine_amount,
+                                )
+
+                        # 更新月度统计的其他字段（次数等）
                         monthly_row = await conn.fetchrow(
                             """
                             SELECT 
-                                SUM(work_start_count) AS work_start_count,
-                                SUM(work_end_count) AS work_end_count,
-                                SUM(late_count) AS late_count,
-                                SUM(early_count) AS early_count,
-                                SUM(work_start_fines) AS work_start_fines,
-                                SUM(work_end_fines) AS work_end_fines,
-                                SUM(work_hours) AS work_hours,
-                                SUM(work_days) AS work_days
+                                COALESCE(SUM(work_start_count), 0) AS work_start_count,
+                                COALESCE(SUM(work_end_count), 0) AS work_end_count,
+                                COALESCE(SUM(late_count), 0) AS late_count,
+                                COALESCE(SUM(early_count), 0) AS early_count,
+                                COALESCE(SUM(work_hours), 0) AS work_hours,
+                                COALESCE(SUM(work_days), 0) AS work_days
                             FROM daily_statistics
-                            WHERE chat_id=$1 AND user_id=$2
+                            WHERE chat_id = $1 
+                              AND user_id = $2 
                               AND DATE_TRUNC('month', record_date) = $3
-                              AND shift=$4
+                              AND shift = $4
                             """,
                             chat_id,
                             user_id,
@@ -2976,67 +3035,68 @@ class PostgreSQLDatabase:
                             shift,
                         )
 
-                        # 插入或更新 monthly_statistics
-                        await conn.execute(
-                            """
-                            INSERT INTO monthly_statistics (chat_id, user_id, statistic_date, shift,
-                                work_start_count, work_end_count, late_count, early_count,
-                                work_start_fines, work_end_fines, work_hours, work_days, updated_at)
-                            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,CURRENT_TIMESTAMP)
-                            ON CONFLICT (chat_id, user_id, statistic_date, shift)
-                            DO UPDATE SET
-                                work_start_count = EXCLUDED.work_start_count,
-                                work_end_count = EXCLUDED.work_end_count,
-                                late_count = EXCLUDED.late_count,
-                                early_count = EXCLUDED.early_count,
-                                work_start_fines = EXCLUDED.work_start_fines,
-                                work_end_fines = EXCLUDED.work_end_fines,
-                                work_hours = EXCLUDED.work_hours,
-                                work_days = EXCLUDED.work_days,
-                                updated_at = CURRENT_TIMESTAMP
-                            """,
-                            chat_id,
-                            user_id,
-                            statistic_date,
-                            shift,
-                            monthly_row["work_start_count"] or 0,
-                            monthly_row["work_end_count"] or 0,
-                            monthly_row["late_count"] or 0,
-                            monthly_row["early_count"] or 0,
-                            monthly_row["work_start_fines"] or 0,
-                            monthly_row["work_end_fines"] or 0,
-                            monthly_row["work_hours"] or 0,
-                            monthly_row["work_days"] or 0,
-                        )
+                        # 更新月度统计的总计字段
+                        if monthly_row:
+                            await conn.execute(
+                                """
+                                INSERT INTO monthly_statistics 
+                                (chat_id, user_id, statistic_date, shift,
+                                 work_start_count, work_end_count, late_count, early_count,
+                                 work_hours, work_days, updated_at)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+                                ON CONFLICT (chat_id, user_id, statistic_date, shift)
+                                DO UPDATE SET
+                                    work_start_count = EXCLUDED.work_start_count,
+                                    work_end_count = EXCLUDED.work_end_count,
+                                    late_count = EXCLUDED.late_count,
+                                    early_count = EXCLUDED.early_count,
+                                    work_hours = EXCLUDED.work_hours,
+                                    work_days = EXCLUDED.work_days,
+                                    updated_at = CURRENT_TIMESTAMP
+                                """,
+                                chat_id,
+                                user_id,
+                                statistic_date,
+                                shift,
+                                monthly_row["work_start_count"],
+                                monthly_row["work_end_count"],
+                                monthly_row["late_count"],
+                                monthly_row["early_count"],
+                                monthly_row["work_hours"],
+                                monthly_row["work_days"],
+                            )
 
-                        # ===== 6. 更新用户总罚款 =====
+                        # ===== 7. 更新用户总罚款 =====
                         await conn.execute(
                             """
                             UPDATE users
                             SET total_fines = (
-                                SELECT COALESCE(SUM(fine_amount),0)
+                                SELECT COALESCE(SUM(fine_amount), 0)
                                 FROM work_records
-                                WHERE chat_id=$1 AND user_id=$2
+                                WHERE chat_id = $1 AND user_id = $2
                             ),
                             updated_at = CURRENT_TIMESTAMP
-                            WHERE chat_id=$1 AND user_id=$2
+                            WHERE chat_id = $1 AND user_id = $2
                             """,
                             chat_id,
                             user_id,
                         )
 
-                        # ===== 7. 清理缓存 =====
+                        # ===== 8. 清理缓存 =====
                         cache_key = f"user:{chat_id}:{user_id}"
                         self._cache.pop(cache_key, None)
                         self._cache_ttl.pop(cache_key, None)
 
-                        logger.debug(
-                            f"✅ [工作记录完成] 用户:{user_id} | 日期:{business_date} | "
-                            f"班次:{shift} | 类型:{checkin_type} | 工时:{int(daily_row['work_seconds'] or 0)}s | "
-                            f"罚款:{fine_amount}"
+                        logger.info(
+                            f"✅ [工作记录完成] 用户:{user_id} | "
+                            f"日期:{business_date} | 班次:{shift} | "
+                            f"类型:{checkin_type} | 工时:{int(daily_row['work_seconds'] or 0)}s | "
+                            f"罚款:{fine_amount} | "
+                            f"上班次数:{daily_row['work_start_count']} | "
+                            f"下班次数:{daily_row['work_end_count']}"
                         )
 
-                break  # 成功退出重试循环
+                    break  # 成功退出重试循环
 
             except (SerializationError, PostgresError) as e:
                 attempt += 1

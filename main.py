@@ -7409,7 +7409,7 @@ async def export_and_push_csv(
     from_monthly_table: bool = False,
     push_file: bool = True,
 ) -> bool:
-    """导出群组数据为 CSV 并推送（完整版 - 包含所有字段）"""
+    """导出群组数据为 CSV 并推送（完整版 - 严格按照指定表头顺序）"""
 
     # ===== 创建本地副本，避免作用域问题 =====
     local_chat_id = chat_id
@@ -7455,6 +7455,7 @@ async def export_and_push_csv(
             await db.init_group(local_chat_id)
 
             def safe_int(value, default=0):
+                """安全转换为整数"""
                 if value is None:
                     return default
                 try:
@@ -7470,12 +7471,14 @@ async def export_and_push_csv(
                     return default
 
             def safe_format_time(seconds):
+                """安全格式化时间"""
                 try:
                     return MessageFormatter.format_time_for_csv(safe_int(seconds))
                 except Exception:
                     return "0分0秒"
 
             def format_shift_for_export(shift: str) -> str:
+                """格式化班次为中文"""
                 if not shift:
                     return "白班"
                 shift_lower = str(shift).lower()
@@ -7675,176 +7678,49 @@ async def export_and_push_csv(
 
             watchdog.feed()
 
-            # ===== 定义所有需要导出的字段 =====
-            # 动态活动（从数据库读取）
-            dynamic_activities = set(activity_limits.keys())
+            # ===== 获取所有活动并按字母排序 =====
+            all_activities = sorted(activity_limits.keys())
 
-            # 特殊统计字段（固定）
-            special_fields = {
-                "overtime_count",
-                "overtime_time",
-                "total_fines",
-                "work_days",
-                "work_hours",
-                "work_start_count",
-                "work_end_count",
-                "work_start_fines",
-                "work_end_fines",
-                "late_count",
-                "early_count",
-            }
-
-            # 合并所有需要导出的活动/字段
-            all_export_fields = sorted(dynamic_activities | special_fields)
-
-            # ===== 字段名中文映射 =====
-            field_name_map = {
-                # 活动字段
-                "吃饭": "吃饭",
-                "大厕": "大厕",
-                "小厕": "小厕",
-                "抽烟或休息": "抽烟或休息",
-                # 统计字段
-                "overtime_count": "超时次数",
-                "overtime_time": "超时时长",
-                "total_fines": "罚款总金额",
-                "work_days": "工作天数",
-                "work_hours": "工作时长",
-                "work_start_count": "上班次数",
-                "work_end_count": "下班次数",
-                "work_start_fines": "上班罚款",
-                "work_end_fines": "下班罚款",
-                "late_count": "迟到次数",
-                "early_count": "早退次数",
-            }
-
-            # ===== 统一的字段映射表 =====
-            field_mapping = {}
-
-            # 动态活动映射
-            for act in dynamic_activities:
-                field_mapping[act] = {
-                    "type": "dynamic",
-                    "count_field": f"{act}_count",
-                    "time_field": f"{act}_time",
-                    "has_count": True,
-                    "has_time": True,
-                }
-
-            # 特殊字段映射
-            field_mapping.update(
-                {
-                    "overtime_count": {
-                        "type": "special",
-                        "count_field": "overtime_count",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                    "overtime_time": {
-                        "type": "special",
-                        "count_field": "overtime_count",
-                        "time_field": "total_overtime_time",
-                        "has_count": False,
-                        "has_time": True,
-                    },
-                    "total_fines": {
-                        "type": "special",
-                        "count_field": None,
-                        "time_field": "total_fines",
-                        "has_count": False,
-                        "has_time": True,
-                    },
-                    "work_days": {
-                        "type": "special",
-                        "count_field": "work_days",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                    "work_hours": {
-                        "type": "special",
-                        "count_field": None,
-                        "time_field": "work_hours",
-                        "has_count": False,
-                        "has_time": True,
-                    },
-                    "work_start_count": {
-                        "type": "special",
-                        "count_field": "work_start_count",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                    "work_end_count": {
-                        "type": "special",
-                        "count_field": "work_end_count",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                    "work_start_fines": {
-                        "type": "special",
-                        "count_field": None,
-                        "time_field": "work_start_fines",
-                        "has_count": False,
-                        "has_time": True,
-                    },
-                    "work_end_fines": {
-                        "type": "special",
-                        "count_field": None,
-                        "time_field": "work_end_fines",
-                        "has_count": False,
-                        "has_time": True,
-                    },
-                    "late_count": {
-                        "type": "special",
-                        "count_field": "late_count",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                    "early_count": {
-                        "type": "special",
-                        "count_field": "early_count",
-                        "time_field": None,
-                        "has_count": True,
-                        "has_time": False,
-                    },
-                }
-            )
-
-            # ===== 生成CSV表头（中文版，包含总计字段）=====
+            # ===== 生成CSV表头（严格按照指定顺序）=====
             csv_buffer = StringIO()
             writer = csv.writer(csv_buffer)
 
-            headers = ["用户ID", "用户昵称", "班次"]
+            # 定义完整的表头顺序
+            headers = [
+                "用户ID",  # user_id
+                "用户昵称",  # nickname
+                "班次",  # shift
+                "工作天数",  # work_days
+                "上班次数",  # work_start_count
+                "下班次数",  # work_end_count
+                "工作时长",  # work_hours
+            ]
 
-            for field in all_export_fields:
-                mapping = field_mapping[field]
-                # 获取中文名称，如果没有映射则使用原字段名
-                display_name = field_name_map.get(field, field)
+            # 为每个活动添加次数和时长字段
+            for act in all_activities:
+                headers.append(f"{act}次数")
+                headers.append(f"{act}总时长")
 
-                if mapping["has_count"] and mapping["has_time"]:
-                    headers.extend([f"{display_name}次数", f"{display_name}总时长"])
-                elif mapping["has_count"]:
-                    headers.append(f"{display_name}次数")
-                elif mapping["has_time"]:
-                    if field == "total_fines":
-                        headers.append(f"{display_name}")  # 罚款总金额不加"时长"
-                    else:
-                        headers.append(f"{display_name}")
-
-            # 添加总计字段（这些不在 special_fields 中，需要单独添加）
-            headers.extend(["活动次数总计", "活动用时总计"])
+            # 添加总计和其他统计字段
+            headers.extend(
+                [
+                    "活动次数总计",  # total_activity_count
+                    "活动用时总计",  # total_accumulated_time
+                    "超时次数",  # overtime_count
+                    "超时时长",  # total_overtime_time
+                    "早退次数",  # early_count
+                    "迟到次数",  # late_count
+                    "下班罚款",  # work_end_fines
+                    "上班罚款",  # work_start_fines
+                    "罚款总金额",  # total_fines
+                ]
+            )
 
             writer.writerow(headers)
 
             # ===== 统计信息 =====
             unique_users = set()
             total_records = 0
-            data_from_activities = 0
-            data_from_fields = 0
 
             # ===== 写入数据行 =====
             for user_data in group_stats:
@@ -7853,80 +7729,62 @@ async def export_and_push_csv(
                 if user_id:
                     unique_users.add(str(user_id))
 
+                activities = user_data.get("activities", {})
+
                 # 基础信息
                 row = [
                     user_data.get("user_id", "未知"),
                     user_data.get("nickname", "未知用户"),
                     format_shift_for_export(user_data.get("shift", "day")),
+                    # 工作天数
+                    safe_int(user_data.get("work_days", 0)),
+                    # 上班次数
+                    safe_int(user_data.get("work_start_count", 0)),
+                    # 下班次数
+                    safe_int(user_data.get("work_end_count", 0)),
+                    # 工作时长（格式化为时间）
+                    safe_format_time(safe_int(user_data.get("work_hours", 0))),
                 ]
 
-                activities = user_data.get("activities", {})
+                # 添加每个活动的数据
+                for act in all_activities:
+                    activity_info = activities.get(act, {})
+                    # 次数
+                    row.append(safe_int(activity_info.get("count", 0)))
+                    # 总时长（格式化为时间）
+                    row.append(safe_format_time(safe_int(activity_info.get("time", 0))))
 
-                # 处理每个字段
-                for field in all_export_fields:
-                    mapping = field_mapping[field]
-
-                    if mapping["type"] == "dynamic":
-                        # 动态活动：优先从 activities 读取
-                        activity_info = activities.get(field)
-                        if activity_info:
-                            count = safe_int(activity_info.get("count", 0))
-                            time_seconds = safe_int(activity_info.get("time", 0))
-                            data_from_activities += 1
-                        else:
-                            count = 0
-                            time_seconds = 0
-
-                        if mapping["has_count"]:
-                            row.append(count)
-                        if mapping["has_time"]:
-                            row.append(safe_format_time(time_seconds))
-
-                    else:  # special
-                        # 特殊字段：从 user_data 读取
-                        count_field = mapping.get("count_field")
-                        time_field = mapping.get("time_field")
-
-                        count = (
-                            safe_int(user_data.get(count_field, 0))
-                            if count_field
-                            else 0
-                        )
-                        time_seconds = (
-                            safe_int(user_data.get(time_field, 0)) if time_field else 0
-                        )
-
-                        if count > 0 or time_seconds > 0:
-                            data_from_fields += 1
-
-                        if mapping["has_count"]:
-                            row.append(count)
-                        if mapping["has_time"]:
-                            if field == "total_fines":
-                                row.append(time_seconds)
-                            else:
-                                row.append(safe_format_time(time_seconds))
-
-                # 添加总计字段数据
+                # 添加总计和其他统计字段
                 row.extend(
                     [
+                        # 活动次数总计
                         safe_int(user_data.get("total_activity_count", 0)),
+                        # 活动用时总计
                         safe_format_time(
                             safe_int(user_data.get("total_accumulated_time", 0))
                         ),
+                        # 超时次数
+                        safe_int(user_data.get("overtime_count", 0)),
+                        # 超时时长
+                        safe_format_time(
+                            safe_int(user_data.get("total_overtime_time", 0))
+                        ),
+                        # 早退次数
+                        safe_int(user_data.get("early_count", 0)),
+                        # 迟到次数
+                        safe_int(user_data.get("late_count", 0)),
+                        # 下班罚款
+                        safe_int(user_data.get("work_end_fines", 0)),
+                        # 上班罚款
+                        safe_int(user_data.get("work_start_fines", 0)),
+                        # 罚款总金额
+                        safe_int(user_data.get("total_fines", 0)),
                     ]
                 )
 
                 writer.writerow(row)
 
             watchdog.feed()
-
-            # 记录数据来源统计
-            logger.info(
-                f"📊 [{operation_id}] 数据来源统计: "
-                f"来自activities={data_from_activities}, "
-                f"来自字段补全={data_from_fields}"
-            )
 
             if total_records == 0:
                 logger.warning(
@@ -7996,7 +7854,6 @@ async def export_and_push_csv(
                 f"💾 包含完整的工作记录统计（上班迟到/下班早退）\n"
                 f"📈 总记录数: {total_records} 条\n"
                 f"👥 总用户数: {len(unique_users)} 人\n"
-                f"📊 数据来源: activities={data_from_activities}, 字段补全={data_from_fields}"
             )
 
             input_file = FSInputFile(temp_file, filename=current_file_name)
@@ -8048,7 +7905,6 @@ async def export_and_push_csv(
                 f"✅ [{operation_id}] 数据导出完成\n"
                 f"   文件: {current_file_name}\n"
                 f"   用户数: {len(unique_users)}, 数据行: {total_records}\n"
-                f"   数据来源: activities={data_from_activities}, 字段补全={data_from_fields}\n"
                 f"   耗时: {duration:.2f}秒"
             )
 
