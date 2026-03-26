@@ -7520,7 +7520,7 @@ async def export_and_push_csv(
 
             if working_target_date is None:
                 business_date = await db.get_business_date(local_chat_id)
-                
+
                 if local_is_daily_reset:
                     # 自动重置导出：凌晨执行，导出昨天的数据
                     export_date = business_date - timedelta(days=1)
@@ -7535,9 +7535,9 @@ async def export_and_push_csv(
                         f"👤 [{operation_id}] 手动导出: 业务日期={business_date}, "
                         f"导出日期={export_date}"
                     )
-                
+
                 working_target_date = export_date
-                
+
             else:
                 logger.info(
                     f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}"

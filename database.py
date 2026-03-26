@@ -2819,15 +2819,7 @@ class PostgreSQLDatabase:
         max_retries: int = 3,
         statement_timeout: int = 10000,
     ):
-        """
-        修复版：企业级绝对一致版 - 统计表与 work_records 完全一致
 
-        重要修复：
-        1. ✅ 使用传入的 record_date 而不是自动获取的 business_date
-        2. ✅ 确保夜班下班记录统计在正确的日期
-        3. ✅ 罚款正确分配到 work_start_fines/work_end_fines
-        4. ✅ 月度统计正确更新
-        """
         # ===== 1. 使用传入的 record_date =====
         # business_date = await self.get_business_date(chat_id)  # ❌ 错误：应该用传入的
         business_date = record_date  # ✅ 修复：使用传入的日期
