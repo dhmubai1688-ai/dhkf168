@@ -1378,24 +1378,57 @@ async def start_activity(message: types.Message, act: str):
                 chat_id, uid, act, time_limit, shift=current_shift
             )
 
-            sent_message = await message.answer(
-                MessageFormatter.format_activity_message(
-                    uid,
-                    name,
-                    act,
-                    now.strftime("%m/%d %H:%M:%S"),
-                    current_count + 1,
-                    max_times,
-                    time_limit,
-                    current_shift,
-                ),
-                reply_markup=await get_main_keyboard(
-                    chat_id=chat_id, show_admin=await is_admin(uid)
-                ),
-                reply_to_message_id=message.message_id,
-                parse_mode="HTML",
+            # ===== 获取上一次打卡的消息ID =====
+            last_checkin_message_id = await db.get_user_checkin_message_id(chat_id, uid)
+
+            # 构建打卡消息内容
+            checkin_message_text = MessageFormatter.format_activity_message(
+                uid,
+                name,
+                act,
+                now.strftime("%m/%d %H:%M:%S"),
+                current_count + 1,
+                max_times,
+                time_limit,
+                current_shift,
             )
 
+            # 获取键盘
+            reply_keyboard = await get_main_keyboard(
+                chat_id=chat_id, show_admin=await is_admin(uid)
+            )
+
+            # ===== 发送消息：如果有上一次的消息ID，则引用它 =====
+            if last_checkin_message_id:
+                try:
+                    sent_message = await message.answer(
+                        checkin_message_text,
+                        reply_to_message_id=last_checkin_message_id,
+                        reply_markup=reply_keyboard,
+                        parse_mode="HTML",
+                    )
+                    logger.info(
+                        f"✅ 引用上一次打卡消息: {last_checkin_message_id} 发送成功"
+                    )
+                except Exception as e:
+                    # 引用失败（消息可能被删除），降级为普通发送
+                    logger.warning(f"引用上一次消息失败: {e}，降级为普通发送")
+                    sent_message = await message.answer(
+                        checkin_message_text,
+                        reply_markup=reply_keyboard,
+                        reply_to_message_id=message.message_id,
+                        parse_mode="HTML",
+                    )
+            else:
+                # 没有上一次的消息，普通发送
+                sent_message = await message.answer(
+                    checkin_message_text,
+                    reply_markup=reply_keyboard,
+                    reply_to_message_id=message.message_id,
+                    parse_mode="HTML",
+                )
+
+            # 保存新的打卡消息ID
             await db.update_user_checkin_message(chat_id, uid, sent_message.message_id)
 
             logger.info(
