@@ -7578,6 +7578,8 @@ async def export_and_push_csv(
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     cell.border = BORDER
 
+                ws.row_dimensions[1].height = 21
+
                 # 先构建所有行数据
                 all_rows_data = []
                 for user_data in group_stats:
@@ -7661,6 +7663,8 @@ async def export_and_push_csv(
                         )
                         cell.fill = row_fill
 
+                    ws.row_dimensions[row_idx].height = 21
+
                 # 自动调整列宽（优化版）
                 for col_idx, col in enumerate(ws.columns, 1):
                     max_length = 0
@@ -7679,13 +7683,13 @@ async def export_and_push_csv(
                                     if "\u4e00" <= char <= "\u9fff"
                                 )
                                 if chinese_count > 0:
-                                    cell_length = cell_length + chinese_count * 0.5
+                                    cell_length = cell_length + chinese_count * 1.2
 
                                 max_length = max(max_length, cell_length)
                         except:
                             pass
 
-                    adjusted_width = min(max(max_length + 2, 8), 50)
+                    adjusted_width = min(max(max_length + 2, 8), 120)
                     ws.column_dimensions[column_letter].width = adjusted_width
 
                 # 冻结首行
