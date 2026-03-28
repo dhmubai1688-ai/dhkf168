@@ -83,6 +83,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiohttp import web
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from io import BytesIO
 
 # 在现有的导入后面添加
 from dual_shift_reset import (
@@ -7400,6 +7404,124 @@ async def get_group_stats_from_monthly(chat_id: int, target_date: date) -> List[
         return []
 
 
+def create_excel_workbook(
+    group_stats, all_activities, headers, chat_title, working_target_date
+):
+    """
+    创建 Excel 工作簿并格式化
+    返回 BytesIO 对象
+    """
+    from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    # 创建工作簿
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "打卡统计"
+
+    # 定义颜色
+    HEADER_FILL = PatternFill(
+        start_color="4472C4", end_color="4472C4", fill_type="solid"
+    )  # 蓝色标题
+    HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
+    DATA_FONT = Font(size=10)
+    EMPTY_FILL = PatternFill(
+        start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+    )  # 淡红色背景
+    BORDER = Border(
+        left=Side(style="thin"),
+        right=Side(style="thin"),
+        top=Side(style="thin"),
+        bottom=Side(style="thin"),
+    )
+
+    # 写入表头
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.fill = HEADER_FILL
+        cell.font = HEADER_FONT
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = BORDER
+
+    # 写入数据
+    for row_idx, user_data in enumerate(group_stats, 2):
+        activities = user_data.get("activities", {})
+
+        # 构建行数据
+        row_data = [
+            user_data.get("user_id", "未知"),
+            user_data.get("nickname", "未知用户"),
+            format_shift_for_export(user_data.get("shift", "day")),
+            format_export_value(user_data.get("work_days", 0)),
+            format_export_value(user_data.get("work_start_count", 0)),
+            format_export_value(user_data.get("work_end_count", 0)),
+            format_export_value(user_data.get("work_hours", 0), is_time=True),
+        ]
+
+        # 活动数据
+        for act in all_activities:
+            activity_info = activities.get(act, {})
+            row_data.append(format_export_value(activity_info.get("count", 0)))
+            row_data.append(
+                format_export_value(activity_info.get("time", 0), is_time=True)
+            )
+
+        # 统计数据
+        row_data.extend(
+            [
+                format_export_value(user_data.get("total_activity_count", 0)),
+                format_export_value(
+                    user_data.get("total_accumulated_time", 0), is_time=True
+                ),
+                format_export_value(user_data.get("overtime_count", 0)),
+                format_export_value(
+                    user_data.get("total_overtime_time", 0), is_time=True
+                ),
+                format_export_value(user_data.get("early_count", 0)),
+                format_export_value(user_data.get("late_count", 0)),
+                format_export_value(user_data.get("work_end_fines", 0)),
+                format_export_value(user_data.get("work_start_fines", 0)),
+                format_export_value(user_data.get("total_fines", 0)),
+            ]
+        )
+
+        # 写入每个单元格并应用样式
+        for col_idx, value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.font = DATA_FONT
+            cell.border = BORDER
+            cell.alignment = Alignment(
+                horizontal="center" if isinstance(value, (int, float)) else "left"
+            )
+
+            # 如果值为 "-"（空数据），添加淡红色背景
+            if value == "-":
+                cell.fill = EMPTY_FILL
+
+    # 自动调整列宽
+    for col_idx, col in enumerate(ws.columns, 1):
+        max_length = 0
+        column_letter = get_column_letter(col_idx)
+        for cell in col:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        adjusted_width = min(max_length + 2, 30)  # 最大宽度限制为 30
+        ws.column_dimensions[column_letter].width = adjusted_width
+
+    # 冻结首行
+    ws.freeze_panes = "A2"
+
+    # 保存到 BytesIO
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    return output
+
+
 async def export_and_push_csv(
     chat_id: int,
     to_admin_if_no_group: bool = True,
@@ -7409,7 +7531,7 @@ async def export_and_push_csv(
     from_monthly_table: bool = False,
     push_file: bool = True,
 ) -> bool:
-    """导出群组数据为 CSV 并推送（完整版 - 严格按照指定表头顺序）"""
+    """导出群组数据为 XLSX 并推送（整行空数据淡红色背景）"""
 
     # ===== 创建本地副本，避免作用域问题 =====
     local_chat_id = chat_id
@@ -7488,6 +7610,179 @@ async def export_and_push_csv(
                     return "夜班"
                 return "白班"
 
+            def format_export_value(value, is_time: bool = False):
+                """格式化导出值，空数据显示为 '-'"""
+                if value is None:
+                    return "-"
+                try:
+                    num_value = int(value)
+                    if num_value <= 0:
+                        return "-"
+                    if is_time:
+                        return safe_format_time(num_value)
+                    return str(num_value)
+                except (ValueError, TypeError):
+                    if not value or str(value).strip() == "":
+                        return "-"
+                    return str(value)
+
+            def is_row_empty(row_data, exclude_indices=None):
+                """
+                判断整行数据是否为空（除了用户ID、昵称、班次）
+                exclude_indices: 排除的列索引（用户ID、昵称、班次）
+                """
+                if exclude_indices is None:
+                    exclude_indices = {0, 1, 2}  # 排除用户ID、昵称、班次
+
+                for idx, value in enumerate(row_data):
+                    if idx in exclude_indices:
+                        continue
+                    # 如果任何非排除字段不是 "-"，则行不为空
+                    if value != "-":
+                        return False
+                return True
+
+            def create_excel_workbook(group_stats, all_activities, headers):
+                """创建 Excel 工作簿并格式化"""
+                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+                from openpyxl.utils import get_column_letter
+
+                # 创建工作簿
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "打卡统计"
+
+                # 定义颜色
+                HEADER_FILL = PatternFill(
+                    start_color="4472C4", end_color="4472C4", fill_type="solid"
+                )
+                HEADER_FONT = Font(color="FFFFFF", bold=True, size=11)
+                DATA_FONT = Font(size=10)
+                EMPTY_ROW_FILL = PatternFill(
+                    start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+                )  # 淡红色
+                NORMAL_FILL = PatternFill(
+                    start_color="FFFFFF", end_color="FFFFFF", fill_type="solid"
+                )  # 白色
+                BORDER = Border(
+                    left=Side(style="thin"),
+                    right=Side(style="thin"),
+                    top=Side(style="thin"),
+                    bottom=Side(style="thin"),
+                )
+
+                # 写入表头
+                for col_idx, header in enumerate(headers, 1):
+                    cell = ws.cell(row=1, column=col_idx, value=header)
+                    cell.fill = HEADER_FILL
+                    cell.font = HEADER_FONT
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.border = BORDER
+
+                # 先构建所有行数据，再判断哪些行是空行
+                all_rows_data = []
+                for user_data in group_stats:
+                    activities = user_data.get("activities", {})
+
+                    # 构建行数据
+                    row_data = [
+                        user_data.get("user_id", "未知"),
+                        user_data.get("nickname", "未知用户"),
+                        format_shift_for_export(user_data.get("shift", "day")),
+                        format_export_value(user_data.get("work_days", 0)),
+                        format_export_value(user_data.get("work_start_count", 0)),
+                        format_export_value(user_data.get("work_end_count", 0)),
+                        format_export_value(
+                            user_data.get("work_hours", 0), is_time=True
+                        ),
+                    ]
+
+                    # 活动数据
+                    for act in all_activities:
+                        activity_info = activities.get(act, {})
+                        row_data.append(
+                            format_export_value(activity_info.get("count", 0))
+                        )
+                        row_data.append(
+                            format_export_value(
+                                activity_info.get("time", 0), is_time=True
+                            )
+                        )
+
+                    # 统计数据
+                    row_data.extend(
+                        [
+                            format_export_value(
+                                user_data.get("total_activity_count", 0)
+                            ),
+                            format_export_value(
+                                user_data.get("total_accumulated_time", 0), is_time=True
+                            ),
+                            format_export_value(user_data.get("overtime_count", 0)),
+                            format_export_value(
+                                user_data.get("total_overtime_time", 0), is_time=True
+                            ),
+                            format_export_value(user_data.get("early_count", 0)),
+                            format_export_value(user_data.get("late_count", 0)),
+                            format_export_value(user_data.get("work_end_fines", 0)),
+                            format_export_value(user_data.get("work_start_fines", 0)),
+                            format_export_value(user_data.get("total_fines", 0)),
+                        ]
+                    )
+
+                    all_rows_data.append(row_data)
+
+                # 写入数据并应用样式
+                for row_idx, row_data in enumerate(all_rows_data, 2):
+                    # 判断整行是否为空（除了用户ID、昵称、班次）
+                    is_empty_row = is_row_empty(row_data, exclude_indices={0, 1, 2})
+
+                    for col_idx, value in enumerate(row_data, 1):
+                        cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                        cell.font = DATA_FONT
+                        cell.border = BORDER
+
+                        # 数字居中对齐，文本左对齐
+                        if isinstance(value, (int, float)) or (
+                            isinstance(value, str) and value.replace("-", "").isdigit()
+                        ):
+                            cell.alignment = Alignment(
+                                horizontal="center", vertical="center"
+                            )
+                        else:
+                            cell.alignment = Alignment(
+                                horizontal="left", vertical="center"
+                            )
+
+                        # 整行为空时，所有单元格都设置淡红色背景
+                        if is_empty_row:
+                            cell.fill = EMPTY_ROW_FILL
+                        else:
+                            cell.fill = NORMAL_FILL
+
+                # 自动调整列宽
+                for col_idx, col in enumerate(ws.columns, 1):
+                    max_length = 0
+                    column_letter = get_column_letter(col_idx)
+                    for cell in col:
+                        try:
+                            if cell.value:
+                                max_length = max(max_length, len(str(cell.value)))
+                        except:
+                            pass
+                    adjusted_width = min(max_length + 2, 30)
+                    ws.column_dimensions[column_letter].width = adjusted_width
+
+                # 冻结首行
+                ws.freeze_panes = "A2"
+
+                # 保存到 BytesIO
+                output = BytesIO()
+                wb.save(output)
+                output.seek(0)
+
+                return output
+
             beijing_now = db.get_beijing_time()
             current_hour = beijing_now.hour
             current_minute = beijing_now.minute
@@ -7522,14 +7817,12 @@ async def export_and_push_csv(
                 business_date = await db.get_business_date(local_chat_id)
 
                 if local_is_daily_reset:
-                    # 自动重置导出：凌晨执行，导出昨天的数据
                     export_date = business_date - timedelta(days=1)
                     logger.info(
                         f"🔄 [{operation_id}] 自动重置导出: 业务日期={business_date}, "
                         f"导出日期={export_date}"
                     )
                 else:
-                    # 手动导出（按钮/命令）：导出今天的业务日期
                     export_date = business_date
                     logger.info(
                         f"👤 [{operation_id}] 手动导出: 业务日期={business_date}, "
@@ -7537,7 +7830,6 @@ async def export_and_push_csv(
                     )
 
                 working_target_date = export_date
-
             else:
                 logger.info(
                     f"📅 [{operation_id}] 使用指定的目标日期: {working_target_date}"
@@ -7549,19 +7841,15 @@ async def export_and_push_csv(
             current_file_name = local_file_name
             if not current_file_name:
                 if local_is_daily_reset:
-                    current_file_name = (
-                        f"daily_backup_{local_chat_id}_{working_target_date:%Y%m%d}.csv"
-                    )
+                    current_file_name = f"daily_backup_{local_chat_id}_{working_target_date:%Y%m%d}.xlsx"
                 else:
-                    current_file_name = (
-                        f"manual_export_{local_chat_id}_{beijing_now:%Y%m%d_%H%M%S}.csv"
-                    )
+                    current_file_name = f"manual_export_{local_chat_id}_{beijing_now:%Y%m%d_%H%M%S}.xlsx"
 
             logger.info(
                 f"🔍 [{operation_id}] 获取群组 {local_chat_id} 的统计数据，日期: {working_target_date}"
             )
 
-            # ===== 获取数据 =====
+            # ===== 获取数据（保留原有 fallback 机制）=====
             current_from_monthly_table = local_from_monthly_table
             if current_from_monthly_table:
                 logger.info(f"📊 [{operation_id}] 尝试从月度表获取数据")
@@ -7585,6 +7873,7 @@ async def export_and_push_csv(
 
             if not current_from_monthly_table:
                 try:
+                    # 使用 asyncio.gather 并发获取数据
                     activity_task = asyncio.create_task(db.get_activity_limits_cached())
                     stats_task = asyncio.create_task(
                         db.get_group_statistics(local_chat_id, working_target_date)
@@ -7639,7 +7928,6 @@ async def export_and_push_csv(
 
                 user_id = user_data.get("user_id", f"unknown_{idx}")
 
-                # 确保所有必要字段存在
                 user_data["work_start_count"] = safe_int(
                     user_data.get("work_start_count", 0)
                 )
@@ -7690,137 +7978,63 @@ async def export_and_push_csv(
             # ===== 获取所有活动并按字母排序 =====
             all_activities = sorted(activity_limits.keys())
 
-            # ===== 生成CSV表头（严格按照指定顺序）=====
-            csv_buffer = StringIO()
-            writer = csv.writer(csv_buffer)
-
-            # 定义完整的表头顺序
+            # ===== 定义表头 =====
             headers = [
-                "用户ID",  # user_id
-                "用户昵称",  # nickname
-                "班次",  # shift
-                "工作天数",  # work_days
-                "上班次数",  # work_start_count
-                "下班次数",  # work_end_count
-                "工作时长",  # work_hours
+                "用户ID",
+                "用户昵称",
+                "班次",
+                "工作天数",
+                "上班次数",
+                "下班次数",
+                "工作时长",
             ]
 
-            # 为每个活动添加次数和时长字段
             for act in all_activities:
                 headers.append(f"{act}次数")
                 headers.append(f"{act}总时长")
 
-            # 添加总计和其他统计字段
             headers.extend(
                 [
-                    "活动次数总计",  # total_activity_count
-                    "活动用时总计",  # total_accumulated_time
-                    "超时次数",  # overtime_count
-                    "超时时长",  # total_overtime_time
-                    "早退次数",  # early_count
-                    "迟到次数",  # late_count
-                    "下班罚款",  # work_end_fines
-                    "上班罚款",  # work_start_fines
-                    "罚款总金额",  # total_fines
+                    "活动次数总计",
+                    "活动用时总计",
+                    "超时次数",
+                    "超时时长",
+                    "早退次数",
+                    "迟到次数",
+                    "下班罚款",
+                    "上班罚款",
+                    "罚款总金额",
                 ]
             )
-
-            writer.writerow(headers)
 
             # ===== 统计信息 =====
             unique_users = set()
             total_records = 0
-
-            # ===== 写入数据行 =====
             for user_data in group_stats:
-                total_records += 1
                 user_id = user_data.get("user_id")
                 if user_id:
                     unique_users.add(str(user_id))
+                total_records += 1
 
-                activities = user_data.get("activities", {})
+            # ===== 创建 Excel 文件 =====
+            excel_buffer = create_excel_workbook(
+                group_stats=group_stats, all_activities=all_activities, headers=headers
+            )
 
-                # 基础信息
-                row = [
-                    user_data.get("user_id", "未知"),
-                    user_data.get("nickname", "未知用户"),
-                    format_shift_for_export(user_data.get("shift", "day")),
-                    # 工作天数
-                    safe_int(user_data.get("work_days", 0)),
-                    # 上班次数
-                    safe_int(user_data.get("work_start_count", 0)),
-                    # 下班次数
-                    safe_int(user_data.get("work_end_count", 0)),
-                    # 工作时长（格式化为时间）
-                    safe_format_time(safe_int(user_data.get("work_hours", 0))),
-                ]
-
-                # 添加每个活动的数据
-                for act in all_activities:
-                    activity_info = activities.get(act, {})
-                    # 次数
-                    row.append(safe_int(activity_info.get("count", 0)))
-                    # 总时长（格式化为时间）
-                    row.append(safe_format_time(safe_int(activity_info.get("time", 0))))
-
-                # 添加总计和其他统计字段
-                row.extend(
-                    [
-                        # 活动次数总计
-                        safe_int(user_data.get("total_activity_count", 0)),
-                        # 活动用时总计
-                        safe_format_time(
-                            safe_int(user_data.get("total_accumulated_time", 0))
-                        ),
-                        # 超时次数
-                        safe_int(user_data.get("overtime_count", 0)),
-                        # 超时时长
-                        safe_format_time(
-                            safe_int(user_data.get("total_overtime_time", 0))
-                        ),
-                        # 早退次数
-                        safe_int(user_data.get("early_count", 0)),
-                        # 迟到次数
-                        safe_int(user_data.get("late_count", 0)),
-                        # 下班罚款
-                        safe_int(user_data.get("work_end_fines", 0)),
-                        # 上班罚款
-                        safe_int(user_data.get("work_start_fines", 0)),
-                        # 罚款总金额
-                        safe_int(user_data.get("total_fines", 0)),
-                    ]
-                )
-
-                writer.writerow(row)
-
-            watchdog.feed()
-
-            if total_records == 0:
-                logger.warning(
-                    f"⚠️ [{operation_id}] 群组 {local_chat_id} 没有有效数据需要导出"
-                )
-                if not local_is_daily_reset:
-                    await bot_manager.send_message_with_retry(
-                        local_chat_id, "⚠️ 当前没有数据需要导出"
-                    )
-                return True
-
-            # ===== 写入文件 =====
-            csv_content = csv_buffer.getvalue()
-            csv_buffer.close()
-
+            # ===== 写入临时文件（使用异步写入 + fallback 机制）=====
             temp_file = f"temp_{operation_id}_{current_file_name}"
 
             async def write_file_async():
+                """异步写入文件，失败时降级为同步写入"""
                 try:
-                    async with aiofiles.open(temp_file, "w", encoding="utf-8-sig") as f:
-                        await f.write(csv_content)
+                    async with aiofiles.open(temp_file, "wb") as f:
+                        await f.write(excel_buffer.getvalue())
                     return True
                 except Exception as e:
                     logger.error(f"❌ [{operation_id}] 异步写入文件失败: {e}")
                     try:
-                        with open(temp_file, "w", encoding="utf-8-sig") as f:
-                            f.write(csv_content)
+                        with open(temp_file, "wb") as f:
+                            f.write(excel_buffer.getvalue())
                         return True
                     except Exception as sync_e:
                         logger.error(
@@ -7829,6 +8043,7 @@ async def export_and_push_csv(
                         return False
 
             async def get_chat_title_async():
+                """异步获取群组标题"""
                 try:
                     chat_info = await bot_manager.bot.get_chat(local_chat_id)
                     return chat_info.title or f"群组 {local_chat_id}"
@@ -7836,6 +8051,7 @@ async def export_and_push_csv(
                     logger.warning(f"⚠️ [{operation_id}] 获取群组标题失败: {e}")
                     return f"群组 {local_chat_id}"
 
+            # 并发执行：写入文件 + 获取群组标题
             write_result, chat_title = await asyncio.gather(
                 write_file_async(), get_chat_title_async()
             )
@@ -7863,6 +8079,7 @@ async def export_and_push_csv(
                 f"💾 包含完整的工作记录统计（上班迟到/下班早退）\n"
                 f"📈 总记录数: {total_records} 条\n"
                 f"👥 总用户数: {len(unique_users)} 人\n"
+                f"🎨 完全无活动记录的行已标注淡红色背景"
             )
 
             input_file = FSInputFile(temp_file, filename=current_file_name)
@@ -7879,7 +8096,7 @@ async def export_and_push_csv(
                     if success:
                         send_to_group_success = True
                         logger.info(
-                            f"✅ [{operation_id}] CSV文件已发送到群组 {local_chat_id}"
+                            f"✅ [{operation_id}] Excel文件已发送到群组 {local_chat_id}"
                         )
                     else:
                         logger.error(f"❌ [{operation_id}] bot_manager 发送文档失败")

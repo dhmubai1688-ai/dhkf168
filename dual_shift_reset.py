@@ -647,17 +647,30 @@ async def _force_end_single_activity_optimized(
         start_time = datetime.fromisoformat(user_row["activity_start_time"])
         start_date = start_time.date()
 
+        # ===== 修复：统一处理所有活动，都写入记录 =====
+        # 计算活动时长
+        elapsed = int((now - start_time).total_seconds())
+        result["elapsed"] = elapsed
+
+        # 确定强制归档的日期
         if start_date < business_today:
+            # 活动开始日期早于业务今天（跨天活动）
             if start_date <= target_date:
                 forced_date = target_date
             else:
                 forced_date = business_today - timedelta(days=1)
+            logger.info(
+                f"📅 [强制结束-跨天] 用户{user_row['user_id']} 活动{activity} "
+                f"开始于{start_date}，归档到{forced_date}"
+            )
         else:
-            logger.debug(f"⏭️ 保留今天活动: 用户{user_row['user_id']}")
-            result["success"] = True
-            return result
-
-        elapsed = int((now - start_time).total_seconds())
+            # 活动开始日期 >= 业务今天（当天活动，但重置时未结束）
+            # 归档到业务昨天
+            forced_date = business_today - timedelta(days=1)
+            logger.info(
+                f"📅 [强制结束-当天] 用户{user_row['user_id']} 活动{activity} "
+                f"开始于{start_date}，归档到{forced_date}（当天未结束活动强制归档）"
+            )
 
         # 使用预加载的配置
         config = activity_configs.get(activity, {})
@@ -686,10 +699,10 @@ async def _force_end_single_activity_optimized(
                 m = segments[-1]
                 fine_amount = fine_rates.get(str(m), fine_rates.get(f"{m}min", 0))
 
-        result["elapsed"] = elapsed
         result["fine"] = fine_amount
         result["is_overtime"] = is_overtime
 
+        # ✅ 始终写入活动记录
         await db.complete_user_activity(
             chat_id=chat_id,
             user_id=user_row["user_id"],
@@ -706,7 +719,8 @@ async def _force_end_single_activity_optimized(
         logger.info(
             f"✅ [强制结束] 用户{user_row['user_id']} | "
             f"活动:{activity} | 班次:{user_row['shift']} | "
-            f"归到:{forced_date} | 时长:{elapsed}s | 罚款:{fine_amount}"
+            f"开始:{start_date} | 归档:{forced_date} | "
+            f"时长:{elapsed}s ({elapsed//60}分钟) | 罚款:{fine_amount}"
         )
 
     except Exception as e:
