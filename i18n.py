@@ -20,6 +20,15 @@ ACTIVITY_VI: Dict[str, str] = {
     "抽烟或休息": "Nghỉ hoặc hút thuốc",
 }
 
+# 活动按钮图标（Telegram 回复键盘不支持图片，用 emoji 显示在按钮文字前）
+ACTIVITY_ICONS: Dict[str, str] = {
+    "小厕": "💧",
+    "大厕": "🚽",
+    "吃饭": "🍚",
+    "抽烟或休息": "🚬",
+}
+DEFAULT_ACTIVITY_ICON = ""  # 后台新增的活动不显示图标；想要默认图标可填 emoji
+
 WORK_BUTTONS_META = {
     "work_start_day": {
         "zh": "白班上班",
@@ -90,6 +99,24 @@ def activity_label(activity: str, mode: LangMode = "both") -> str:
     return format_label(activity, vi, mode)
 
 
+def activity_button_label(activity: str, mode: LangMode = "both") -> str:
+    """键盘上显示的活动按钮文字（带图标）"""
+    icon = ACTIVITY_ICONS.get(activity, DEFAULT_ACTIVITY_ICON)
+    label = activity_label(activity, mode)
+    return f"{icon} {label}" if icon else label
+
+
+def _strip_activity_icon(text: str) -> str:
+    """去掉按钮文字开头的活动图标，便于匹配回活动名"""
+    icons = set(ACTIVITY_ICONS.values())
+    if DEFAULT_ACTIVITY_ICON:
+        icons.add(DEFAULT_ACTIVITY_ICON)
+    for icon in icons:
+        if icon and text.startswith(icon):
+            return text[len(icon):].strip()
+    return text
+
+
 def _labels_for_meta(meta: dict, mode: LangMode) -> str:
     return format_label(meta["zh"], meta.get("vi"), mode)
 
@@ -150,7 +177,7 @@ def resolve_button(text: str) -> str:
 
 def resolve_activity_name(text: str, activity_limits: Dict) -> Optional[str]:
     """将按钮/输入文本匹配到数据库中的活动名"""
-    text = text.strip()
+    text = _strip_activity_icon(text.strip())
     if not text or not activity_limits:
         return None
     if text in activity_limits:
