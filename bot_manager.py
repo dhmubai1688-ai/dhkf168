@@ -6,12 +6,36 @@ import sys
 import fcntl
 from typing import Optional, Dict, Any
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.storage.memory import MemoryStorage
 from config import Config
 
 from fault_tolerance import telegram_circuit_breaker
 
 logger = logging.getLogger("GroupCheckInBot")
+
+
+class RetryAfterSession(AiohttpSession):
+    """遇到 Telegram 限流(429)时，按 Telegram 要求的等待时间后自动重试，
+    避免大量人同时打卡时回复直接丢失。"""
+
+    MAX_RETRIES = 5
+    MAX_SLEEP_SEC = 60
+
+    async def make_request(self, bot, method, timeout=None):
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                return await super().make_request(bot, method, timeout)
+            except TelegramRetryAfter as e:
+                if attempt >= self.MAX_RETRIES:
+                    raise
+                wait = min(float(e.retry_after) + 0.5, self.MAX_SLEEP_SEC)
+                logger.warning(
+                    f"⏳ Telegram 限流，{wait:.1f}s 后重试 "
+                    f"({attempt + 1}/{self.MAX_RETRIES}): {type(method).__name__}"
+                )
+                await asyncio.sleep(wait)
 
 
 class RobustBotManager:
@@ -77,7 +101,7 @@ class RobustBotManager:
 
     async def initialize(self):
         """初始化Bot"""
-        self.bot = Bot(token=self.token)
+        self.bot = Bot(token=self.token, session=RetryAfterSession())
         self.dispatcher = Dispatcher(storage=MemoryStorage())
         logger.info("Bot管理器初始化完成")
 
