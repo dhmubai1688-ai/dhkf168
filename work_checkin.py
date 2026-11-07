@@ -325,7 +325,7 @@ async def process_work_checkin(
     name = message.from_user.full_name
 
     # ===== 新增：创建看门狗，45秒超时 =====
-    watchdog = Watchdog(timeout=45, name=f"work_checkin_{chat_id}_{uid}_{checkin_type}")
+    watchdog = Watchdog(timeout=180, name=f"work_checkin_{chat_id}_{uid}_{checkin_type}")
     user_reply_sent = False
 
     async def _process_work_checkin_impl():
@@ -1585,4 +1585,3 @@ async def send_work_notification(
         logger.error(
             f"[{trace_id}] ❌ send_work_notification总异常: {e}", exc_info=True
         )
-
