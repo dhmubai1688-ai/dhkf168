@@ -7,7 +7,7 @@ from database import db
 from i18n import (
     WORK_BUTTONS_META,
     UI_BUTTONS_META,
-    activity_label,
+    activity_button_label,
     get_lang_mode,
     input_placeholder,
     make_keyboard_button,
@@ -130,7 +130,7 @@ async def get_main_keyboard(
         activity_limits = await db.get_activity_limits_cached()
 
     activity_btns = [
-        make_keyboard_button(activity_label(act, lang))
+        make_keyboard_button(activity_button_label(act, lang))
         for act in activity_limits.keys()
     ]
 
