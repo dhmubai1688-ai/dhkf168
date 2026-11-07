@@ -148,10 +148,6 @@ async def get_main_keyboard(
             work_row = [
                 [
                     make_keyboard_button(
-                        work_button_label("work_start_day", lang),
-                        WORK_BUTTONS_META["work_start_day"]["style"],
-                    ),
-                    make_keyboard_button(
                         work_button_label("work_start_night", lang),
                         WORK_BUTTONS_META["work_start_night"]["style"],
                     ),
