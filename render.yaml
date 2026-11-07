@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: tg-attendance
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: ENV
+        value: production
+      - key: TZ
+        value: Asia/Shanghai
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TELEGRAM_TOKEN_SECRET
+        generateValue: true
+      - key: PGSSLROOTCERT
+        value: /etc/secrets/aiven-ca.pem
+      - key: DB_MAX_CONNECTIONS
+        value: "5"
+      - key: GOMEMLIMIT
+        value: 256MiB
+      - key: GOGC
+        value: "70"
