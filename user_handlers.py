@@ -359,7 +359,7 @@ async def handle_back_command(message: types.Message):
 
 
 @user_rate_limit(rate=5, per=60)
-@rate_limit(rate=100, per=60)
+@rate_limit(rate=1000, per=60)
 async def handle_work_buttons(message: types.Message):
     """处理双班上下班按钮"""
     chat_id = message.chat.id
@@ -510,7 +510,7 @@ async def handle_back_to_main_menu(message: types.Message):
 
 
 @user_rate_limit(rate=10, per=60)
-@rate_limit(rate=100, per=60)
+@rate_limit(rate=1000, per=60)
 async def handle_all_text_messages(message: types.Message):
     """统一处理活动按钮等文本消息"""
     text = message.text.strip()
@@ -961,5 +961,3 @@ async def handle_quick_back(callback_query: types.CallbackQuery):
     except Exception as e:
         logger.error(f"❌ 快速回座失败: {e}", exc_info=True)
         await callback_query.answer("❌ 回座失败，请点底部回座按钮或 /at", show_alert=True)
-
-
