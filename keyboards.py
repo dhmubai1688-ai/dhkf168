@@ -162,22 +162,9 @@ async def get_main_keyboard(
                 ]
             ]
 
+    # 已移除底部三个按钮（管理员面板 / 我的记录 / 排行榜）
+    # 命令 /admin /myinfo /ranking 仍可使用
     bottom_buttons = []
-    if show_admin:
-        bottom_buttons.append(
-            [
-                make_keyboard_button(ui_button_label("admin_panel", lang)),
-                make_keyboard_button(ui_button_label("my_record", lang)),
-                make_keyboard_button(ui_button_label("rank", lang)),
-            ]
-        )
-    else:
-        bottom_buttons.append(
-            [
-                make_keyboard_button(ui_button_label("my_record", lang)),
-                make_keyboard_button(ui_button_label("rank", lang)),
-            ]
-        )
 
     keyboard = work_row + activity_rows + bottom_buttons
 
